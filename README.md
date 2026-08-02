@@ -110,11 +110,21 @@ Read the source before running them.
   showing nonsense. Reports welcome.
 - No auto-update mechanism yet.
 
+## Contributions
+
+This project is shared as-is and is **not accepting contributions** — no pull
+requests, and no commitment to review or respond to them.
+
+You are welcome to use the app, read the source, build it yourself, and fork it
+for your own purposes under the licence below.
+
+## Licence
+
+[MIT](LICENSE). Use it, build it, fork it; no warranty is given.
+
 ## Credits
 
 - [devicePEQ](https://github.com/jeromeof/devicePEQ) — prior open-source work on
   the Qudelix HID protocol
 - [AutoEq](https://github.com/jaakkopasanen/AutoEq) by Jaakko Pasanen — the
   headphone correction database
-
-Provided as-is, with no warranty.
