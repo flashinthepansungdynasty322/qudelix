@@ -285,8 +285,10 @@ struct BandRow: View {
             .controlSize(.mini)
             .frame(width: 58)
 
+            // No thousands separator: in a European locale `.number` renders
+            // 8800 Hz as "8.800", which reads as 8.8.
             TextField("", value: Binding(get: { band.freq }, set: { set { $0.freq = $1 } ($0) }),
-                      format: .number)
+                      format: .number.grouping(.never))
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.mini)
                 .font(.system(size: 10).monospacedDigit())

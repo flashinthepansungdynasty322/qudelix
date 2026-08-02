@@ -5,14 +5,84 @@ import AppKit
 /// Development aid: `Qudelix.app/Contents/MacOS/QudelixBar --render-ui <dir>`
 /// renders the popover to PNGs with mock state, so the layout can be checked
 /// without a device attached. Never runs during normal launch.
+/// The translucent material a real menu bar popover sits on.
+private struct VisualEffectBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = .popover
+        v.blendingMode = .behindWindow
+        v.state = .active
+        return v
+    }
+    func updateNSView(_ v: NSVisualEffectView, context: Context) {}
+}
+
 enum UIPreview {
     @MainActor
     static func runIfRequested() {
         let args = CommandLine.arguments
-        guard let i = args.firstIndex(of: "--render-ui") else { return }
-        let dir = i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory()
-        render(into: URL(fileURLWithPath: dir))
-        exit(0)
+        if let i = args.firstIndex(of: "--render-ui") {
+            let dir = i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory()
+            render(into: URL(fileURLWithPath: dir))
+            exit(0)
+        }
+        if let i = args.firstIndex(of: "--render-shots") {
+            let dir = i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory()
+            renderShots(into: URL(fileURLWithPath: dir))
+            exit(0)
+        }
+    }
+
+    /// Screenshots for the README.
+    ///
+    /// `ImageRenderer` cannot draw AppKit-backed controls (sliders, pickers,
+    /// toggles all come out as placeholders). Hosting the same views in a real
+    /// offscreen NSWindow and calling `cacheDisplay` makes AppKit draw them for
+    /// real, so these are genuine renderings of the shipping UI rather than
+    /// mock-ups — and it needs no Screen Recording permission.
+    @MainActor
+    private static func renderShots(into dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        for (name, scheme) in [("light", NSAppearance(named: .aqua)),
+                               ("dark", NSAppearance(named: .darkAqua))] {
+            for (pane, controller) in mocks() {
+                let root = PopoverView()
+                    .environmentObject(controller)
+                    .frame(width: 400)
+                    .background(VisualEffectBackground())
+
+                let hosting = NSHostingView(rootView: root)
+                hosting.appearance = scheme
+                let fitting = hosting.fittingSize
+                hosting.frame = NSRect(origin: .zero,
+                                       size: CGSize(width: 400, height: max(fitting.height, 200)))
+
+                // A real window, parked far offscreen so nothing flashes on
+                // screen; controls only draw correctly inside one.
+                let window = NSWindow(contentRect: hosting.frame,
+                                      styleMask: [.borderless],
+                                      backing: .buffered, defer: false)
+                window.appearance = scheme
+                window.isOpaque = false
+                window.backgroundColor = .clear
+                window.contentView = hosting
+                window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
+                window.orderFrontRegardless()
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    window.close(); continue
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                if let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: dir.appendingPathComponent("\(pane)-\(name).png"))
+                }
+                window.close()
+            }
+        }
+        print("shots written to \(dir.path)")
     }
 
     @MainActor

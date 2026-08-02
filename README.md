@@ -2,6 +2,12 @@
 
 A native macOS menu bar app for configuring the **Qudelix 5K** DAC/amp over USB.
 
+[![Download](https://img.shields.io/github/v/release/FrankieMa77/qudelix?label=download&style=flat-square)](https://github.com/FrankieMa77/qudelix/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/FrankieMa77/qudelix/total?style=flat-square)](https://github.com/FrankieMa77/qudelix/releases)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple)](https://github.com/FrankieMa77/qudelix/releases/latest)
+[![Universal](https://img.shields.io/badge/binary-Apple%20Silicon%20%2B%20Intel-blue?style=flat-square)](https://github.com/FrankieMa77/qudelix/releases/latest)
+[![MIT](https://img.shields.io/badge/licence-MIT-green?style=flat-square)](LICENSE)
+
 Unofficial, and not affiliated with or endorsed by Qudelix, Inc.
 
 Qudelix ship a browser-based configuration app. On macOS it is unreliable —
@@ -11,6 +17,12 @@ app talks to the device directly through IOKit instead, and gets the framing
 right.
 
 ---
+
+## Screenshots
+
+| Equalizer | Presets | Import |
+|---|---|---|
+| ![Equalizer](docs/screenshots/equalizer.png) | ![Presets](docs/screenshots/presets.png) | ![Import](docs/screenshots/import.png) |
 
 ## Features
 
@@ -110,13 +122,18 @@ Read the source before running them.
   showing nonsense. Reports welcome.
 - No auto-update mechanism yet.
 
-## Contributions
+## Feedback and contributions
 
-This project is shared as-is and is **not accepting contributions** — no pull
-requests, and no commitment to review or respond to them.
+Bug reports, ideas, and pull requests are all welcome — open an
+[issue](../../issues) or a PR.
 
-You are welcome to use the app, read the source, build it yourself, and fork it
-for your own purposes under the licence below.
+Especially useful right now:
+
+- **20-band EQ mode** is implemented but has never run on real hardware. If you
+  use it, tell me whether your curve reads back correctly.
+- **Firmware other than 3.1.8**, or any 5K that behaves oddly — the diagnostics
+  panel and `~/Library/Logs/QudelixBar.log` capture everything needed.
+- **Intel Macs.** The binary is universal but has only been run on Apple Silicon.
 
 ## Licence
 
