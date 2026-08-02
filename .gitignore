@@ -90,6 +90,12 @@ qudelix-debug.log
 xcuserdata/
 *.xcuserstate
 
+# Personal drafts and notes — never publish these
+reddit-post.md
+*-draft.md
+/drafts/
+/notes/
+
 # Anything local and unshared
 /private/
 /scratch/
