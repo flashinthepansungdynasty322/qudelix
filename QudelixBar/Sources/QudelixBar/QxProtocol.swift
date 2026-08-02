@@ -1,0 +1,367 @@
+import Foundation
+
+/// Qudelix 5K command protocol.
+/// Reverse-engineered from the official Chrome plugin (q5K-chrome-plugin.js)
+/// via the devicePEQ project. See docs/PROTOCOL_STATUS.md for status structs.
+enum QxCmd: UInt16 {
+    // Handshake / info
+    case reqInitData      = 0x0100
+    case rspInitData      = 0x0101
+    case disconnect       = 0x0107
+    case reqDevStatus     = 0x0110  // arg = bitmask (0x04 = conn)
+    case rspDevStatus     = 0x0111
+    case reqDevConfig     = 0x0120  // arg = bitmask (0x3C = playTime|batt|mic|dac, 0xC0 = sys2|eq)
+    case rspDevConfig     = 0x0121
+    case reqEqPreset      = 0x0123  // arg = group bitmask (1 = usr, 2 = spk)
+    case rspEqPresetL     = 0x0124
+    case rspEqPresetH     = 0x0125
+    case rspEqPreset      = 0x0128
+    case reqDevData       = 0x0140
+    case rspDevData       = 0x0141
+
+    // Device settings
+    case setVolume        = 0x0200  // [subParam, int16BE dB*60] (sink=1) / [subParam, ch, value] variants
+    case setCharger       = 0x0201
+    case setLedMode       = 0x0202
+    case setBatteryCare   = 0x0213
+    case setUsbDacMode    = 0x0217
+    case setDacFilter     = 0x0501
+
+    // EQ (group 0 = usr/headphone, 10 bands, legacy 5K payloads)
+    case setEqEnable      = 0x0700  // [group, 0|1]
+    case setEqType        = 0x0701  // [group, 0=GEQ 1=PEQ]
+    case setEqPreGain     = 0x0703  // sendEqParam
+    case setEqGain        = 0x0704  // sendEqParam, dB*10
+    case setEqQ           = 0x0705  // sendEqParam, Q*1024
+    case setEqFilter      = 0x0706  // sendEqParam, app filter enum
+    case setEqFreq        = 0x0707  // sendEqParam, Hz
+    case saveEqPreset     = 0x0708  // [presetIndex]
+    case loadEqPreset     = 0x0709  // [presetIndex]
+    case setEqPresetName  = 0x070A
+    case reqEqPresetName  = 0x070B  // [presetIndex]
+    case rspEqPresetName  = 0x070C
+    case setEqBandParam   = 0x070F  // [group, chMask, band, filter, freqHi, freqLo, gainHi, gainLo, qHi, qLo]
+    case setEqMute        = 0x0710
+    case reqEqData        = 0x0750
+    case rspEqData        = 0x0751
+
+    // System
+    case sysReboot        = 0x1000
+    case playTestTone     = 0x1004
+    case saveAll          = 0x1007
+    case notification     = 0x2000
+    case warning          = 0x2002
+}
+
+/// Volume sub-parameter flags for the 5K (`ly` enum — NOT the `$y` enum,
+/// which is T71/AuraVita only). First byte of SetVolume payload.
+enum QxVolumeParam: UInt8 {
+    case sink     = 1
+    case call     = 2
+    case source   = 4
+    case sysTrimL = 8
+    case sysTrimR = 16
+    case sysLimit = 32
+    case tone     = 64
+    case mute     = 128
+}
+
+/// ReqInitData payload: [status_hi, status_lo, At.Req] — the firmware
+/// requires this exact 3-byte payload (a bare request crashes its USB stack).
+enum QxInit {
+    static let requestPayload: [UInt8] = [0x00, 0x00, 0x04]
+}
+
+/// RspDevStatus / notification block flags (`Yc`).
+enum QxStatusMask {
+    static let audio: UInt8 = 0x01       // $c, 4 bytes
+    static let power: UInt8 = 0x02       // td, 8 bytes — battery lives here
+    static let conn: UInt8 = 0x04        // od, 16 bytes
+    static let runtimeInfo: UInt8 = 0x08 // Jc, 4 bytes
+    static let runtimeRms: UInt8 = 0x10  // ed, 16 bytes
+    static let runtimeEq: UInt8 = 0x20   // never sent for x5k
+    static let vol: UInt8 = 0x40         // cy, 16 bytes + 1 usbMute byte
+}
+
+/// RspDevConfig block flags (`hy`).
+enum QxConfigMask {
+    static let sys: UInt8 = 0x01         // dd, 12 bytes
+    static let vol: UInt8 = 0x02         // cy, 16 bytes
+    static let playTime: UInt8 = 0x04    // vy, 8 bytes
+    static let dac: UInt8 = 0x08         // gd, 4 bytes
+    static let mic: UInt8 = 0x10         // my, 4 bytes
+    static let batt: UInt8 = 0x20        // fy, 8 bytes
+    static let sys2: UInt8 = 0x40        // fd, 32 bytes
+    static let eq: UInt8 = 0x80          // group cfg + preset-name cfg
+}
+
+/// Notification (0x2000) second-byte flags (`St`), fw >= 3 default path.
+enum QxNotifyMask {
+    static let status: UInt8 = 1
+    static let config: UInt8 = 2
+    static let data: UInt8 = 4
+}
+
+/// App-side filter type enum (what Set/RspEq commands carry on the legacy 5K).
+enum QxFilter: UInt8, CaseIterable, Identifiable {
+    case bypass = 0
+    case lpf    = 1
+    case hpf    = 2
+    case lowShelf  = 3
+    case highShelf = 4
+    case peak   = 5
+
+    var id: UInt8 { rawValue }
+    var label: String {
+        switch self {
+        case .bypass: return "Bypass"
+        case .lpf: return "LPF"
+        case .hpf: return "HPF"
+        case .lowShelf: return "Low Shelf"
+        case .highShelf: return "High Shelf"
+        case .peak: return "Peak"
+        }
+    }
+    /// Compact form for the band table.
+    var shortLabel: String {
+        switch self {
+        case .bypass: return "Off"
+        case .lpf: return "LP"
+        case .hpf: return "HP"
+        case .lowShelf: return "LShelf"
+        case .highShelf: return "HShelf"
+        case .peak: return "Peak"
+        }
+    }
+}
+
+enum QxScale {
+    static let gain: Double = 10      // dB → int16
+    static let q: Double = 1024       // Q → int16
+    static let volume: Double = 60    // dB → int16 (dB60 units)
+}
+
+/// Device identifiers returned in RspInitData (`kt` enum).
+enum QxDeviceModel {
+    static let qudelix5K = 1
+    static let qudelix5KPlus = 2
+    static let t71 = 256
+    static let auraVita = 512
+    static let dongle = 768
+
+    static func name(for id: Int) -> String {
+        switch id {
+        case qudelix5K: return "Qudelix 5K"
+        case qudelix5KPlus: return "Qudelix 5K Plus"
+        case t71: return "Qudelix T71"
+        case auraVita: return "Qudelix Aura Vita"
+        case dongle: return "Qudelix dongle"
+        default: return "This device (id \(id))"
+        }
+    }
+}
+
+/// EQ group (`by` enum). The 5K stores separate presets per group and only one
+/// is active, selected by `dd.eq_mode`.
+enum QxEqGroup: UInt8 {
+    case user = 0     // 10 bands, 1 channel of filter params
+    case speaker = 1  // 10 bands, 2 channels
+    case b20 = 2      // 20 bands, 1 channel
+
+    /// Bands the device exposes for this group (`nBand`).
+    var bandCount: Int { self == .b20 ? 20 : 10 }
+
+    /// Channels of *filter parameters* stored (`nCh` = [1, 2, 1][group]).
+    var paramChannels: Int { self == .speaker ? 2 : 1 }
+
+    /// Channels in the *frequency* table — b20 stores one, the others two.
+    var freqChannels: Int { self == .b20 ? 1 : 2 }
+
+    /// Preset bitstream size. Derived below and cross-checked against the
+    /// firmware's own constants: USR_EQ_1CH_SZ = 88, B20_EQ_1CH_SZ = 128.
+    var presetBytes: Int {
+        let bits = (1 + 14 + 11 + 6)                    // type, impedance, sensitivity, xfeed
+            + 2 * 16                                    // pre-gain, both channels
+            + freqChannels * bandCount * 16             // frequency table
+            + paramChannels * bandCount * (4 + 10 + 14 + 4)  // filter, gain, Q, reserved
+        return bits / 8
+    }
+
+    /// Bitmask used with ReqEqPreset.
+    var requestMask: UInt8 { UInt8(1 << rawValue) }
+
+    /// The device's own default centre frequencies (`Ny.Fc`).
+    var defaultFreqs: [Int] {
+        self == .b20
+            ? [31, 44, 63, 88, 125, 180, 250, 355, 500, 710,
+               1000, 1400, 2000, 2800, 4000, 5600, 8000, 11300, 16000, 22000]
+            : [31, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    }
+}
+
+enum QxEq {
+    static let groupUser: UInt8 = 0
+    static let chMaskBoth: UInt8 = 0x03
+    /// Largest band count across groups — sizing only; use the group's own.
+    static let maxBandCount = 20
+    static let bandCount = 10
+    static let defaultFreqs = QxEqGroup.user.defaultFreqs
+}
+
+// MARK: - Packet building / parsing
+
+enum QxPacket {
+    /// Command payload: [cmdHi, cmdLo, data...]
+    static func payload(_ cmd: QxCmd, _ data: [UInt8] = []) -> [UInt8] {
+        [UInt8(cmd.rawValue >> 8), UInt8(cmd.rawValue & 0xFF)] + data
+    }
+
+    /// TX report body (QCC framing): [payloadLen+1, 0x80, payload...] zero-padded to reportSize.
+    /// Returns empty if the report is too small to hold the framing.
+    static func txReport(_ cmd: QxCmd, _ data: [UInt8], reportSize: Int) -> [UInt8] {
+        let p = payload(cmd, data)
+        guard reportSize >= p.count + 2, reportSize >= 4 else { return [] }
+        var report = [UInt8](repeating: 0, count: reportSize)
+        report[0] = UInt8(clamping: p.count + 1)
+        report[1] = 0x80
+        for (i, b) in p.enumerated() where i + 2 < reportSize { report[i + 2] = b }
+        return report
+    }
+
+    /// RX report body: [payloadLen, cmdHi, cmdLo, data...] → (cmdId, data)
+    static func parseRx(_ buf: [UInt8]) -> (cmdId: UInt16, data: [UInt8])? {
+        guard buf.count >= 3 else { return nil }
+        let len = Int(buf[0])
+        let cmdId = UInt16(buf[1]) << 8 | UInt16(buf[2])
+        guard len >= 2 else { return nil }
+        let end = min(len + 1, buf.count)
+        return (cmdId, Array(buf[3..<max(3, end)]))
+    }
+
+    static func int16BE(_ v: Int) -> [UInt8] {
+        let u = UInt16(bitPattern: Int16(clamping: v))
+        return [UInt8(u >> 8), UInt8(u & 0xFF)]
+    }
+}
+
+// MARK: - Bitstream reader (RspEqPreset payload is a packed LSB-first bitstream)
+
+struct QxBitReader {
+    let buf: [UInt8]
+    var bitOffset = 0
+
+    init(_ buf: [UInt8]) { self.buf = buf }
+
+    mutating func read(_ numBits: Int) -> Int {
+        var value = 0
+        for i in 0..<numBits {
+            let bit = bitOffset + i
+            let byteIdx = bit >> 3
+            guard byteIdx < buf.count else { break }
+            if (buf[byteIdx] >> (bit & 7)) & 1 == 1 { value |= 1 << i }
+        }
+        bitOffset += numBits
+        return value
+    }
+
+    mutating func skip(_ numBits: Int) { bitOffset += numBits }
+
+    static func signExtend(_ v: Int, bits: Int) -> Int {
+        let shift = 64 - bits
+        return (v << shift) >> shift
+    }
+}
+
+/// Decoded user-EQ preset (88-byte v3 bitstream, nCh=1, 10 bands).
+struct QxUserEqPreset {
+    var preGain: Double = 0
+    var bands: [QxEqBandValue] = []
+
+    /// Layout (`fromArray_v3`, verbatim from the firmware's own parser):
+    ///
+    ///     [1]  type          [14] impedance     [11] sensitivity   [6] crossfeed
+    ///     [16] preGain ch0   [16] preGain ch1                      (int16, dB×10)
+    ///     freq table:  freqChannels × bandCount × [16] uint16 Hz
+    ///     per band:    paramChannels × bandCount ×
+    ///                    ([4] filter, [10] gain dB×10 signed, [14] Q ×1024, [4] reserved)
+    ///
+    /// The 20-band (b20) group stores one channel of frequencies where the
+    /// 10-band groups store two — that difference is the whole reason its
+    /// buffer is 128 bytes rather than 88.
+    static func decode(_ buf: [UInt8], group: QxEqGroup = .user) -> QxUserEqPreset {
+        var r = QxBitReader(buf)
+        r.skip(1 + 14 + 11 + 6)
+        var preset = QxUserEqPreset()
+        preset.preGain = Double(QxBitReader.signExtend(r.read(16), bits: 16)) / QxScale.gain
+        r.skip(16)  // ch1 pre-gain
+
+        let bandCount = group.bandCount
+        var freqs = [[Int]](repeating: [Int](repeating: 0, count: bandCount),
+                            count: group.freqChannels)
+        for ch in 0..<group.freqChannels {
+            for b in 0..<bandCount { freqs[ch][b] = r.read(16) }
+        }
+
+        let defaults = group.defaultFreqs
+        for b in 0..<bandCount {
+            let typeRaw = r.read(4)
+            let gainRaw = r.read(10)
+            let qRaw = r.read(14)
+            r.skip(4)
+            let stored = freqs.first?[b] ?? 0
+            preset.bands.append(QxEqBandValue(
+                filter: QxFilter(rawValue: UInt8(typeRaw)) ?? .peak,
+                freq: stored > 0 ? stored : defaults[b],
+                gain: Double(QxBitReader.signExtend(gainRaw, bits: 10)) / QxScale.gain,
+                q: qRaw > 0 ? Double(qRaw) / QxScale.q : 1.0
+            ))
+        }
+        return preset
+    }
+
+    /// Sanity check for a decoded preset. The 20-band layout is derived from
+    /// the firmware's parser but has never been run against real hardware, so
+    /// an implausible result is treated as a decode failure rather than being
+    /// shown as if it were the device's actual curve.
+    var looksPlausible: Bool {
+        guard !bands.isEmpty, abs(preGain) <= 24 else { return false }
+        return bands.allSatisfy { b in
+            b.freq >= 10 && b.freq <= 24000 && abs(b.gain) <= 24 && b.q > 0 && b.q <= 20
+        }
+    }
+}
+
+struct QxEqBandValue: Equatable {
+    var filter: QxFilter = .peak
+    var freq: Int = 1000
+    var gain: Double = 0
+    var q: Double = 1.0
+}
+
+/// Reassembles segmented RspEqPreset packets into the preset buffer.
+/// Segment data: [group, (totalPkts<<4)|pktIdx, res, res, offsetBE16, chunk...]
+struct QxPresetAssembler {
+    private(set) var buffer = [UInt8](repeating: 0, count: 128)
+    private(set) var complete = false
+    /// Only segments for this group are accepted; the device also streams the
+    /// groups we aren't editing.
+    var group: QxEqGroup = .user
+
+    mutating func ingest(_ data: [UInt8]) -> Bool {
+        guard data.count >= 7, data[0] == group.rawValue else { return false }
+        let totalPkts = Int(data[1] >> 4)
+        let pktIdx = Int(data[1] & 0x0F)
+        let offset = Int(data[4]) << 8 | Int(data[5])
+        let chunk = Array(data[6...])
+        if offset + chunk.count <= buffer.count {
+            for (i, b) in chunk.enumerated() { buffer[offset + i] = b }
+        }
+        if pktIdx == totalPkts { complete = true }
+        return complete
+    }
+
+    mutating func reset() {
+        buffer = [UInt8](repeating: 0, count: 128)
+        complete = false
+    }
+}

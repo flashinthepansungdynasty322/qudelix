@@ -1,0 +1,188 @@
+import Foundation
+
+/// Parsers for the 5K's status/config structs. All structs are LSB-first
+/// bitfields (multi-byte fields little-endian); see docs/PROTOCOL_STATUS.md.
+struct QxDeviceState {
+    /// `kt` enum: 1 = original 5K, 2 = 5K Plus, 256 = T71, 512 = AuraVita…
+    var deviceId: Int = 0
+    var fwVersion: String?
+    var fwMajor: Int?
+    var fwMinor: Int?
+    /// `dd.eq_mode`: 0 = 10-band user/speaker EQ, 1 = 20-band (b20) mode.
+    ///
+    /// On firmware 3.x the *command encoding* is identical for both — the
+    /// official app picks its encoding on `isV2` (firmware 2.x), not on band
+    /// count. 20-band differs only in EQ group (2 = b20), band count (20), the
+    /// default frequency table, and the preset read-back layout. It is simply
+    /// not implemented here yet; this app always targets group 0.
+    var eqMode: Int?
+    var batteryPercent: Int?
+    var batteryMilliVolts: Int?
+    var charging = false
+    var chargerConnected = false
+    var sampleRateLabel: String?
+    var inputSourceLabel: String?
+    var volumeDb: Double?          // cy.sink_dB60 / 60
+    var volumeLimitDb: Double?
+    var trimLeftDb: Double?
+    var trimRightDb: Double?
+    var usbMute: Bool?
+    var eqEnabled: Bool?
+    var eqPresetIdx: Int?
+    var presetNameMask: Int = 0    // 20 bits — slots with saved names
+    var dacOutPwr2Vrms = false     // +6 dB headroom when true
+    var dacFilterType: Int?
+}
+
+extension Array where Element == UInt8 {
+    /// Bytes from `offset` to the end, or empty if the offset is out of range.
+    ///
+    /// Device payloads are untrusted: block lengths come from mask bytes the
+    /// firmware sends, so an offset can legitimately run past a truncated
+    /// packet. Plain `Array(d[off...])` traps in that case.
+    func tail(from offset: Int) -> [UInt8] {
+        guard offset >= 0, offset < count else { return [] }
+        return Array(self[offset...])
+    }
+}
+
+enum QxStatusParser {
+    static let sampleRates = ["8 kHz", "16 kHz", "32 kHz", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz"]
+    static let inputSources = ["None", "USB", "A2DP 1", "A2DP 2", "HFP 1", "HFP 2"]
+    static let dacFilters = [
+        "Linear phase fast roll-off", "Linear phase slow roll-off",
+        "Linear phase super slow roll-off", "Minimum phase fast roll-off",
+        "Minimum phase slow roll-off", "Minimum phase super slow roll-off",
+        "Hybrid fast roll-off", "NOS (88.2/96 kHz only)",
+    ]
+
+    /// RspInitData: [devId u16 BE][status u8 == 3][8B fw version bitfield]
+    /// [devStatus block][devConfig block][warranty 4B][usbMute]
+    static func parseInitData(_ d: [UInt8], into state: inout QxDeviceState) -> Bool {
+        guard d.count >= 11 else { return false }
+        let devId = Int(d[0]) << 8 | Int(d[1])
+        guard d[2] == 3 else { return false }  // At.Success
+        state.deviceId = devId
+
+        var r = QxBitReader(Array(d[3..<11]))
+        let major = r.read(6), minor = r.read(6), rev = r.read(4)
+        state.fwVersion = "\(major).\(minor).\(rev)"
+        state.fwMajor = major
+        state.fwMinor = minor
+
+        var off = 11
+        off += parseDevStatus(d.tail(from: off), into: &state)
+        _ = parseDevConfig(d.tail(from: off), into: &state)
+        return true
+    }
+
+    /// devStatus block: [Yc mask][sub-blocks in ascending bit order].
+    /// Returns bytes consumed (including the mask byte).
+    static func parseDevStatus(_ d: [UInt8], into state: inout QxDeviceState) -> Int {
+        guard !d.isEmpty else { return 0 }
+        let mask = d[0]
+        var off = 1
+
+        if mask & QxStatusMask.audio != 0, d.count >= off + 4 {
+            var r = QxBitReader(Array(d[off..<off + 4]))
+            r.skip(5)                       // mute, running, active_call, hfp_codec(2)
+            r.skip(4)                       // a2dp_codec
+            let inSource = r.read(3)
+            r.skip(4)                       // in_bits(2), out_unbalanced, out_power
+            let srIdx = r.read(4)
+            if srIdx < sampleRates.count { state.sampleRateLabel = sampleRates[srIdx] }
+            if inSource < inputSources.count { state.inputSourceLabel = inputSources[inSource] }
+            off += 4
+        }
+        if mask & QxStatusMask.power != 0, d.count >= off + 8 {
+            var r = QxBitReader(Array(d[off..<off + 8]))
+            state.chargerConnected = r.read(1) == 1
+            state.charging = r.read(1) == 1
+            r.skip(3 + 3 + 1)               // charger_state, dac_state, batt_low
+            state.batteryPercent = r.read(7)
+            state.batteryMilliVolts = r.read(13)
+            off += 8
+        }
+        if mask & QxStatusMask.conn != 0 { off += 16 }
+        if mask & QxStatusMask.runtimeInfo != 0 { off += 4 }
+        if mask & QxStatusMask.runtimeRms != 0 { off += 16 }
+        if mask & QxStatusMask.vol != 0, d.count >= off + 17 {
+            parseVolBlock(Array(d[off..<off + 16]), into: &state)
+            state.usbMute = d[off + 16] != 0
+            off += 17
+        }
+        return min(off, d.count)
+    }
+
+    /// devConfig block: [hy mask][sub-blocks in ascending bit order].
+    static func parseDevConfig(_ d: [UInt8], into state: inout QxDeviceState) -> Int {
+        guard !d.isEmpty else { return 0 }
+        let mask = d[0]
+        var off = 1
+
+        if mask & QxConfigMask.sys != 0 {
+            // `dd`, 12 bytes. Only eq_mode (bit 36) matters here: it selects
+            // between the 10-band user/speaker EQ and the 20-band b20 mode.
+            if d.count >= off + 12 {
+                var r = QxBitReader(Array(d[off..<off + 12]))
+                r.skip(36)
+                state.eqMode = r.read(1)
+            }
+            off += 12
+        }
+        if mask & QxConfigMask.vol != 0, d.count >= off + 16 {
+            parseVolBlock(Array(d[off..<off + 16]), into: &state)
+            off += 16
+        } else if mask & QxConfigMask.vol != 0 { return off }
+        if mask & QxConfigMask.playTime != 0 { off += 8 }
+        if mask & QxConfigMask.dac != 0, d.count >= off + 4 {
+            var r = QxBitReader(Array(d[off..<off + 4]))
+            r.skip(5)                       // outMode(2), outSel(3)  — v3 layout
+            state.dacOutPwr2Vrms = r.read(1) == 1
+            r.skip(12)                      // bits 6..17
+            state.dacFilterType = r.read(4)
+            off += 4
+        }
+        if mask & QxConfigMask.mic != 0 { off += 4 }
+        if mask & QxConfigMask.batt != 0 { off += 8 }
+        if mask & QxConfigMask.sys2 != 0 { off += 32 }
+        if mask & QxConfigMask.eq != 0, d.count > off {
+            // fw >= 3: [group byte] + groupCfg(4) + presetNameCfg(4);
+            // if group == usr(0), the spk group follows in the same block.
+            let group = d[off]; off += 1
+            off += parseEqGroupCfg(d, at: off, into: &state, applies: group == 0)
+            if group == 0, d.count > off {
+                off += 1  // spk group byte
+                off += parseEqGroupCfg(d, at: off, into: &state, applies: false)
+            }
+        }
+        return min(off, d.count)
+    }
+
+    /// groupCfg (4B: headroom int8, presetIdx u8, enable:1, auto_headroom:1)
+    /// + presetNameCfg (4B: nameMask:20). Returns bytes consumed.
+    private static func parseEqGroupCfg(_ d: [UInt8], at start: Int,
+                                        into state: inout QxDeviceState, applies: Bool) -> Int {
+        guard d.count >= start + 8 else { return max(0, d.count - start) }
+        if applies {
+            var r = QxBitReader(Array(d[start..<start + 4]))
+            r.skip(8)  // headroom
+            state.eqPresetIdx = r.read(8)
+            state.eqEnabled = r.read(1) == 1
+            var n = QxBitReader(Array(d[start + 4..<start + 8]))
+            state.presetNameMask = n.read(20)
+        }
+        return 8
+    }
+
+    /// cy volume struct (16B): 8 × int16 LE, unit dB*60.
+    private static func parseVolBlock(_ d: [UInt8], into state: inout QxDeviceState) {
+        func int16LE(_ i: Int) -> Double {
+            Double(Int16(bitPattern: UInt16(d[i]) | UInt16(d[i + 1]) << 8))
+        }
+        state.volumeDb = int16LE(0) / QxScale.volume
+        state.volumeLimitDb = int16LE(2) / QxScale.volume
+        state.trimLeftDb = int16LE(6) / QxScale.volume
+        state.trimRightDb = int16LE(8) / QxScale.volume
+    }
+}

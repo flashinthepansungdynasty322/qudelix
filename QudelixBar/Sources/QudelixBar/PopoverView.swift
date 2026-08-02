@@ -1,0 +1,498 @@
+import SwiftUI
+
+struct PopoverView: View {
+    @EnvironmentObject var controller: QudelixController
+    @State private var pane: Pane = .equalizer
+    @State private var showDiagnostics = false
+    @State private var editingBand: Int?
+
+    enum Pane: String, CaseIterable, Identifiable {
+        case equalizer = "Equalizer"
+        case presets = "Presets"
+        case importing = "Import"
+        var id: String { rawValue }
+        var icon: String {
+            switch self {
+            case .equalizer: return "slider.horizontal.3"
+            case .presets: return "square.stack"
+            case .importing: return "arrow.down.circle"
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DeviceHeader()
+            Divider()
+                .onAppear { if let p = controller.previewPane { pane = p } }
+
+            if case .unsupported(let title, let detail) = controller.compatibility, connected {
+                UnsupportedDeviceView(title: title, detail: detail)
+            } else if connected {
+                // No outer ScrollView on purpose: the panes that can grow
+                // (presets, search results, diagnostics) scroll internally, so
+                // nesting one here would trap scroll gestures.
+                VStack(spacing: 14) {
+                    EQCurveView(bands: controller.bands,
+                                preGain: controller.preGain,
+                                highlighted: editingBand)
+                        .frame(height: 104)
+
+                    VolumeControl()
+
+                    Picker("", selection: $pane) {
+                        ForEach(Pane.allCases) { p in
+                            Label(p.rawValue, systemImage: p.icon).tag(p)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    switch pane {
+                    case .equalizer: EqEditorView(editingBand: $editingBand)
+                    case .presets: PresetsView()
+                    case .importing: ImportView()
+                    }
+                }
+                .padding(14)
+            } else {
+                DisconnectedView()
+            }
+
+            Divider()
+            FooterBar(showDiagnostics: $showDiagnostics)
+            if showDiagnostics {
+                Divider()
+                DiagnosticsView().padding(.horizontal, 14).padding(.bottom, 10)
+            }
+        }
+        .frame(width: 400)
+    }
+
+    private var connected: Bool {
+        if case .connected = controller.connection { return true }
+        return false
+    }
+}
+
+// MARK: - Header
+
+struct DeviceHeader: View {
+    @EnvironmentObject var controller: QudelixController
+
+    var body: some View {
+        HStack(spacing: 11) {
+            ZStack {
+                Circle()
+                    .fill(connected
+                          ? AnyShapeStyle(LinearGradient(colors: [.accentColor, .accentColor.opacity(0.65)],
+                                                         startPoint: .top, endPoint: .bottom))
+                          : AnyShapeStyle(Color.secondary.opacity(0.25)))
+                    .frame(width: 34, height: 34)
+                Image(systemName: "headphones")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(connected ? .white : .secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(deviceName).font(.system(size: 13, weight: .semibold))
+                Text(statusLine)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            if let batt = controller.batteryPercent {
+                HStack(spacing: 3) {
+                    Image(systemName: controller.charging ? "battery.100.bolt" : batteryIcon(batt))
+                        .foregroundStyle(controller.charging ? .green
+                                         : (batt <= 20 ? .orange : .secondary))
+                    Text("\(batt)%").font(.system(size: 11, weight: .medium).monospacedDigit())
+                }
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(.quaternary.opacity(0.5), in: Capsule())
+            }
+
+            Button { controller.refresh() } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!connected)
+            .help("Refresh from device")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+
+    private var connected: Bool {
+        if case .connected = controller.connection { return true }
+        return false
+    }
+    private var deviceName: String {
+        if case .connected(let n) = controller.connection { return n.replacingOccurrences(of: " USB DAC 96KHz", with: "") }
+        return "Qudelix"
+    }
+    private var statusLine: String {
+        guard connected else { return "Not connected" }
+        var parts = ["USB"]
+        if let fw = controller.firmwareVersion { parts.append("FW \(fw)") }
+        if let sr = controller.sampleRate, controller.inputSource != "None" { parts.append(sr) }
+        if let src = controller.inputSource, src != "None" { parts.append(src) } else { parts.append("idle") }
+        return parts.joined(separator: " · ")
+    }
+    private func batteryIcon(_ p: Int) -> String {
+        switch p {
+        case 80...: return "battery.100"
+        case 55..<80: return "battery.75"
+        case 30..<55: return "battery.50"
+        case 10..<30: return "battery.25"
+        default: return "battery.0"
+        }
+    }
+}
+
+// MARK: - Volume
+
+struct VolumeControl: View {
+    @EnvironmentObject var controller: QudelixController
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button { controller.setMute(!controller.muted) } label: {
+                Image(systemName: controller.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(controller.muted ? .orange : .secondary)
+                    .frame(width: 18)
+            }
+            .buttonStyle(.borderless)
+            .help(controller.muted ? "Unmute" : "Mute")
+
+            Slider(value: Binding(get: { controller.volumeDb },
+                                  set: { controller.setVolume($0) }),
+                   in: controller.volumeRange)
+                .disabled(controller.muted)
+
+            Text(String(format: "%.1f", controller.volumeDb))
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .frame(width: 34, alignment: .trailing)
+            Text("dB").font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 11).padding(.vertical, 8)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Equalizer pane
+
+struct EqEditorView: View {
+    @EnvironmentObject var controller: QudelixController
+    @Binding var editingBand: Int?
+
+    var body: some View {
+        VStack(spacing: 9) {
+            HStack {
+                Toggle(isOn: Binding(get: { controller.eqEnabled },
+                                     set: { controller.setEqEnabled($0) })) {
+                    Text("Equalizer").font(.system(size: 11, weight: .medium))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+
+                Spacer()
+
+                Text("Pre-gain").font(.system(size: 10)).foregroundStyle(.secondary)
+                Slider(value: Binding(get: { controller.preGain },
+                                      set: { controller.setPreGain($0) }),
+                       in: -12...12, step: 0.5)
+                    .frame(width: 92)
+                Text(String(format: "%+.1f", controller.preGain))
+                    .font(.system(size: 10).monospacedDigit())
+                    .frame(width: 30, alignment: .trailing)
+            }
+
+            Divider()
+
+            bandTable
+                .opacity(controller.eqEnabled ? 1 : 0.45)
+                .disabled(!controller.eqEnabled)
+
+            HStack {
+                Button("Flatten") { controller.flatten() }
+                Text("\(controller.bandCount)-band")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Menu("Save to preset…") {
+                    ForEach(0..<QudelixController.presetCount, id: \.self) { i in
+                        Button(controller.presetLabel(i)) { controller.savePreset(i) }
+                    }
+                }
+                .fixedSize()
+            }
+            .controlSize(.small)
+            .font(.system(size: 11))
+        }
+    }
+}
+
+extension EqEditorView {
+    /// 10 bands fit inline; 20 would add ~250pt to the window, so the table
+    /// scrolls in that case. The height is definite, not a maximum — a scroll
+    /// view given only a max collapses inside this self-sizing popover.
+    @ViewBuilder
+    var bandTable: some View {
+        let grid = Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 5) {
+            GridRow {
+                Text("").frame(width: 12)
+                Text("Type").font(.system(size: 9)).foregroundStyle(.secondary).frame(width: 58)
+                Text("Hz").font(.system(size: 9)).foregroundStyle(.secondary).frame(width: 50, alignment: .trailing)
+                Text("Gain").font(.system(size: 9)).foregroundStyle(.secondary)
+                Text("").frame(width: 32)
+                Text("Q").font(.system(size: 9)).foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
+            }
+            ForEach(0..<controller.bandCount, id: \.self) { i in
+                BandRow(index: i, editingBand: $editingBand)
+            }
+        }
+        if controller.bandCount > 10 {
+            ScrollView { grid.padding(.trailing, 4) }
+                .frame(height: 250)
+        } else {
+            grid
+        }
+    }
+}
+
+struct BandRow: View {
+    @EnvironmentObject var controller: QudelixController
+    let index: Int
+    @Binding var editingBand: Int?
+
+    var body: some View {
+        let band = controller.bands[index]
+        GridRow {
+            Text("\(index + 1)")
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 12)
+
+            Picker("", selection: Binding(get: { band.filter }, set: { set { $0.filter = $1 } ($0) })) {
+                ForEach(QxFilter.allCases) { f in Text(f.shortLabel).tag(f) }
+            }
+            .labelsHidden()
+            .controlSize(.mini)
+            .frame(width: 58)
+
+            TextField("", value: Binding(get: { band.freq }, set: { set { $0.freq = $1 } ($0) }),
+                      format: .number)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.mini)
+                .font(.system(size: 10).monospacedDigit())
+                .multilineTextAlignment(.trailing)
+                .frame(width: 50)
+
+            Slider(value: Binding(get: { band.gain }, set: { set { $0.gain = $1 } ($0) }),
+                   in: -12...12,
+                   onEditingChanged: { editing in editingBand = editing ? index : nil })
+                .controlSize(.mini)
+
+            Text(String(format: "%+.1f", band.gain))
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(band.gain == 0 ? .secondary : .primary)
+                .frame(width: 32, alignment: .trailing)
+
+            TextField("", value: Binding(get: { band.q }, set: { set { $0.q = $1 } ($0) }),
+                      format: .number.precision(.fractionLength(2)))
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.mini)
+                .font(.system(size: 10).monospacedDigit())
+                .multilineTextAlignment(.trailing)
+                .frame(width: 42)
+        }
+        .opacity(band.filter == .bypass ? 0.45 : 1)
+    }
+
+    /// Mutate one field of this band and push it to the device.
+    private func set<T>(_ apply: @escaping (inout QxEqBandValue, T) -> Void) -> (T) -> Void {
+        { newValue in
+            var b = controller.bands[index]
+            apply(&b, newValue)
+            controller.updateBand(index, b)
+        }
+    }
+}
+
+// MARK: - Presets pane
+
+struct PresetsView: View {
+    @EnvironmentObject var controller: QudelixController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if controller.activePreset == nil || controller.activePreset == 255 {
+                Text("Current EQ is a custom setting, not a saved slot.")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            ScrollView {
+                VStack(spacing: 3) {
+                    ForEach(0..<QudelixController.presetCount, id: \.self) { i in
+                        presetRow(i)
+                    }
+                }
+            }
+            .frame(height: 190)
+        }
+    }
+
+    private func presetRow(_ i: Int) -> some View {
+        let isActive = controller.activePreset == i
+        let named = controller.presetNames[i] != nil
+        return HStack(spacing: 8) {
+            Text("\(i + 1)")
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 16, alignment: .trailing)
+            Text(controller.presetLabel(i))
+                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(named ? .primary : .secondary)
+            Spacer()
+            if isActive {
+                Text("active").font(.system(size: 9)).foregroundStyle(Color.accentColor)
+            }
+            Button("Load") { controller.loadPreset(i) }
+                .controlSize(.mini)
+                .font(.system(size: 10))
+            Button {
+                controller.savePreset(i)
+            } label: {
+                Image(systemName: "square.and.arrow.down").font(.system(size: 9))
+            }
+            .controlSize(.mini)
+            .help("Overwrite this slot with the current EQ")
+        }
+        .padding(.horizontal, 7).padding(.vertical, 4)
+        .background(isActive ? AnyShapeStyle(Color.accentColor.opacity(0.12))
+                             : AnyShapeStyle(Color.clear),
+                    in: RoundedRectangle(cornerRadius: 5))
+    }
+}
+
+// MARK: - Disconnected / footer / diagnostics
+
+/// Shown instead of the controls when the handshake identifies a device whose
+/// protocol we don't implement. Nothing is written in this state.
+struct UnsupportedDeviceView: View {
+    @EnvironmentObject var controller: QudelixController
+    let title: String
+    let detail: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 24))
+                .foregroundStyle(.orange)
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .multilineTextAlignment(.center)
+            Text(detail)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("No settings have been changed.")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+            if let fw = controller.firmwareVersion {
+                Text("Reported firmware \(fw)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 26)
+    }
+}
+
+struct DisconnectedView: View {
+    var body: some View {
+        VStack(spacing: 9) {
+            Image(systemName: "cable.connector")
+                .font(.system(size: 26))
+                .foregroundStyle(.tertiary)
+            Text("No Qudelix 5K found").font(.system(size: 12, weight: .medium))
+            Text("Connect the 5K with a USB data cable.\nIt will appear here automatically.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 34)
+    }
+}
+
+struct FooterBar: View {
+    @EnvironmentObject var controller: QudelixController
+    @Binding var showDiagnostics: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(connected ? Color.green : Color.secondary.opacity(0.5))
+                .frame(width: 6, height: 6)
+            Text(connected ? "Connected" : "Waiting for device")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button { showDiagnostics.toggle() } label: {
+                Image(systemName: "waveform.path.ecg").font(.system(size: 10))
+            }
+            .buttonStyle(.borderless)
+            .help("Diagnostics")
+
+            Button { NSApp.terminate(nil) } label: {
+                Image(systemName: "power").font(.system(size: 10))
+            }
+            .buttonStyle(.borderless)
+            .help("Quit Qudelix")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+    }
+
+    private var connected: Bool {
+        if case .connected = controller.connection { return true }
+        return false
+    }
+}
+
+struct DiagnosticsView: View {
+    @ObservedObject var log = DebugLog.shared
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(log.lines.enumerated()), id: \.offset) { idx, line in
+                        Text(line)
+                            .font(.system(size: 8.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .id(idx)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(5)
+            }
+            .frame(height: 110)
+            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+            .onChange(of: log.lines.count) { _, n in
+                withAnimation { proxy.scrollTo(n - 1, anchor: .bottom) }
+            }
+        }
+    }
+}

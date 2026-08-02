@@ -1,0 +1,110 @@
+Qudelix for macOS 1.0.0
+=======================
+An unofficial menu bar app for configuring the Qudelix 5K over USB.
+Not affiliated with or endorsed by Qudelix, Inc.
+
+
+INSTALL
+-------
+1. Drag Qudelix.app onto the Applications folder in this window.
+2. Launch it from Applications.
+
+macOS will refuse to open it the first time, saying it cannot verify the
+developer. This is expected: the app is signed only ad-hoc, not with a paid
+Apple Developer ID. To allow it:
+
+   Open System Settings > Privacy & Security, scroll to the Security
+   section, and click "Open Anyway" next to the message about Qudelix.
+   Confirm once, and it will launch normally from then on.
+
+You can verify what you are running before trusting it — the full source is
+included with the project this was built from.
+
+
+USING IT
+--------
+Plug the 5K into your Mac by USB. The app connects on its own; the menu bar
+icon fills in when it is talking to the device. Click it for:
+
+  - Live status: battery, charging, firmware, sample rate, input source
+  - Volume slider and mute
+  - EQ on/off and the 20 preset slots
+  - A 10-band parametric EQ editor with pre-gain and save-to-preset
+  - Preset import from a file or from the AutoEq database (6,000+ headphones)
+  - A diagnostics panel showing every packet exchanged with the device
+
+Bluetooth is not used. The app talks to the 5K's USB HID control interface
+and does not touch the audio path, so playback is unaffected.
+
+To start it automatically, add it in System Settings > General > Login Items.
+
+
+WHAT IT SENDS AND WHERE
+-----------------------
+Since you are being asked to bypass Gatekeeper on trust, here is every bit of
+network and disk activity in the app:
+
+  - It contacts exactly one host, raw.githubusercontent.com, and only to fetch
+    the AutoEq headphone list and the preset you pick. This happens only when
+    you open the Import pane, never at launch.
+  - There is no telemetry, no analytics, no identifiers, no crash reporting.
+  - It writes one local file, ~/Library/Logs/QudelixBar.log, containing device
+    packets, firmware version, battery and volume. It is never transmitted.
+  - It only writes EQ, volume, and preset settings to the 5K — the same
+    settings the official app writes. It never touches firmware.
+
+
+REQUIREMENTS
+------------
+  - macOS 14 (Sonoma) or later
+  - Apple Silicon or Intel (universal binary)
+  - Qudelix 5K connected by USB. Tested against firmware 3.1.8.
+
+
+TROUBLESHOOTING
+---------------
+Nothing appears when the device is plugged in:
+  Open the Diagnostics section in the popover. It logs every packet. The same
+  log is written to ~/Library/Logs/QudelixBar.log.
+
+The device disappears from USB, or the app shows write errors:
+  Unplug and replug the 5K. If it persists, please report it with the log.
+
+
+SUPPORTED DEVICES
+-----------------
+This app implements the original Qudelix 5K protocol on firmware 3.x. Both the
+10-band user EQ and the 20-band mode are supported — it follows whichever mode
+the device is in and shows the matching number of bands automatically.
+
+It identifies your device during the connection handshake and, if it finds
+anything it does not implement, it says so plainly and writes nothing rather
+than silently doing the wrong thing. Cases it will refuse:
+
+  - Qudelix 5K Plus, T71, and Aura Vita — different EQ command set
+  - Firmware 2.x — Qudelix changed the command format in firmware 3
+  - Firmware 1.x — too old (the official app refuses these too)
+
+In each case, update or switch modes with the official Qudelix app and
+reconnect. Nothing is written to the device while it is in a refused state.
+
+
+KNOWN LIMITS
+------------
+  - Only the user (headphone) EQ group is exposed, not the speaker group.
+  - 20-band mode is implemented from Qudelix's own preset format but has not
+    been tested on real hardware. Writing should be identical to 10-band, which
+    is well tested; if reading your existing 20-band curve looks wrong, the app
+    keeps flat defaults rather than showing nonsense. Reports welcome.
+  - Preset slots show generic names unless you have named them on the device.
+
+
+LICENSE / CREDITS
+-----------------
+The device protocol was reverse-engineered from Qudelix's own Chrome app for
+interoperability, with help from the open-source devicePEQ project
+(github.com/jeromeof/devicePEQ). Headphone presets come from AutoEq
+(github.com/jaakkopasanen/AutoEq) by Jaakko Pasanen.
+
+Provided as-is, with no warranty. It writes only EQ, volume, and preset
+settings — the same things the official app writes.

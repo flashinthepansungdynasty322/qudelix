@@ -60,3 +60,39 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# ── Qudelix for macOS ──────────────────────────────────────────────
+.swiftpm/
+DerivedData/
+*.o
+*.dSYM/
+
+# Built app bundle and installer — the DMG is published as a Release asset,
+# not committed, so the repository stays small and clonable.
+Qudelix.app/
+*.dmg
+
+# Generated while making the icon
+AppIcon.iconset/
+
+# Runtime logs — these contain device packet traces from whoever ran the app
+*.log
+qudelix-debug.log
+
+# Editor / OS noise
+.DS_Store
+._*
+.AppleDouble
+*.swp
+*~
+.idea/
+.vscode/
+xcuserdata/
+*.xcuserstate
+
+# Anything local and unshared
+/private/
+/scratch/
+secrets*
+*.pem
+*.p12

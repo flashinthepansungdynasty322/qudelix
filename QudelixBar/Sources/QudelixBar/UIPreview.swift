@@ -1,0 +1,130 @@
+#if DEBUG
+import SwiftUI
+import AppKit
+
+/// Development aid: `Qudelix.app/Contents/MacOS/QudelixBar --render-ui <dir>`
+/// renders the popover to PNGs with mock state, so the layout can be checked
+/// without a device attached. Never runs during normal launch.
+enum UIPreview {
+    @MainActor
+    static func runIfRequested() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--render-ui") else { return }
+        let dir = i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory()
+        render(into: URL(fileURLWithPath: dir))
+        exit(0)
+    }
+
+    @MainActor
+    private static func render(into dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+            for (pane, controller) in mocks() {
+                let view = PopoverView()
+                    .environmentObject(controller)
+                    .environment(\.colorScheme, scheme)
+                    .background(scheme == .dark ? Color(white: 0.13) : Color(white: 0.96))
+
+                let renderer = ImageRenderer(content: AnyView(view))
+                renderer.scale = 2
+                guard let image = renderer.nsImage,
+                      let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let png = rep.representation(using: .png, properties: [:]) else { continue }
+                try? png.write(to: dir.appendingPathComponent("popover-\(pane)-\(name).png"))
+            }
+        }
+        print("rendered to \(dir.path)")
+    }
+
+    @MainActor
+    private static func mocks() -> [(String, QudelixController)] {
+        [("eq", make(.equalizer)), ("presets", make(.presets)), ("import", make(.importing)),
+         ("disconnected", disconnected()), ("unsupported", unsupported()),
+         ("b20", twentyBand())]
+    }
+
+    @MainActor
+    private static func make(_ pane: PopoverView.Pane) -> QudelixController {
+        let c = QudelixController()
+        c.connection = .connected(name: "Qudelix-5K USB DAC 96KHz")
+        c.firmwareVersion = "3.1.8"
+        c.batteryPercent = 81
+        c.charging = true
+        c.sampleRate = "96 kHz"
+        c.inputSource = "USB"
+        c.volumeDb = -24
+        c.volumeMax = 6
+        c.eqEnabled = true
+        c.preGain = -6.1
+        c.activePreset = 2
+        c.presetNames = [0: "Harman", 2: "HD 650", 5: "Bass boost"]
+        // A realistic AutoEq-style curve (Sennheiser HD 650, oratory1990).
+        c.bands = [
+            .init(filter: .lowShelf, freq: 105, gain: 6.4, q: 0.70),
+            .init(filter: .peak, freq: 8800, gain: 5.1, q: 1.42),
+            .init(filter: .peak, freq: 118, gain: -3.1, q: 0.50),
+            .init(filter: .peak, freq: 37, gain: 0.7, q: 3.96),
+            .init(filter: .peak, freq: 3169, gain: -1.7, q: 3.89),
+            .init(filter: .highShelf, freq: 10000, gain: -2.1, q: 0.70),
+            .init(filter: .peak, freq: 1227, gain: -1.2, q: 2.53),
+            .init(filter: .peak, freq: 2055, gain: 1.2, q: 3.23),
+            .init(filter: .peak, freq: 587, gain: 0.4, q: 1.19),
+            .init(filter: .peak, freq: 5332, gain: -1.1, q: 5.75),
+        ]
+        c.previewPane = pane
+        if pane == .importing {
+            c.previewAutoEq = (entries: [
+                AutoEqEntry(title: "Sennheiser HD 650", source: "oratory1990",
+                            path: "oratory1990/over-ear/Sennheiser%20HD%20650"),
+                AutoEqEntry(title: "Sennheiser HD 660S", source: "oratory1990",
+                            path: "oratory1990/over-ear/Sennheiser%20HD%20660S"),
+                AutoEqEntry(title: "Sennheiser HD 600", source: "crinacle",
+                            path: "crinacle/harman_over-ear_2018/Sennheiser%20HD%20600"),
+                AutoEqEntry(title: "Sennheiser HD 6XX", source: "oratory1990",
+                            path: "oratory1990/over-ear/Sennheiser%20HD%206XX"),
+                AutoEqEntry(title: "Sennheiser HD 560S", source: "oratory1990",
+                            path: "oratory1990/over-ear/Sennheiser%20HD%20560S"),
+                AutoEqEntry(title: "Sennheiser HD 800 S", source: "oratory1990",
+                            path: "oratory1990/over-ear/Sennheiser%20HD%20800%20S"),
+                AutoEqEntry(title: "Sennheiser HD 25", source: "crinacle",
+                            path: "crinacle/harman_over-ear_2018/Sennheiser%20HD%2025"),
+            ], query: "HD")
+        }
+        return c
+    }
+
+    @MainActor
+    private static func twentyBand() -> QudelixController {
+        let c = make(.equalizer)
+        c.applyPreviewGroup(.b20)
+        // A plausible 20-band curve so the table and graph have real content.
+        let gains: [Double] = [5.5, 4.0, 2.5, 1.0, -0.5, -2.0, -3.0, -2.5, -1.0, 0.5,
+                               1.5, 2.0, 1.0, -1.5, -3.0, -2.0, 0.5, 3.0, 1.5, -2.0]
+        c.bands = zip(QxEqGroup.b20.defaultFreqs, gains).map { f, g in
+            QxEqBandValue(filter: .peak, freq: f, gain: g, q: 1.0)
+        }
+        c.preGain = -5.5
+        return c
+    }
+
+    @MainActor
+    private static func unsupported() -> QudelixController {
+        let c = make(.equalizer)
+        c.firmwareVersion = "2.4.1"
+        c.compatibility = .unsupported(
+            title: "Firmware 2.4.1 uses a different protocol",
+            detail: "Qudelix changed the EQ command format in firmware 3. "
+                  + "Update with the official app, then reconnect.")
+        return c
+    }
+
+    @MainActor
+    private static func disconnected() -> QudelixController {
+        let c = QudelixController()
+        c.connection = .disconnected
+        return c
+    }
+}
+#endif
