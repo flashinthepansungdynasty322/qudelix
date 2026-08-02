@@ -359,6 +359,8 @@ struct PresetsView: View {
             Text(controller.presetLabel(i))
                 .font(.system(size: 11, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(named ? .primary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
             Spacer()
             if isActive {
                 Text("active").font(.system(size: 9)).foregroundStyle(Color.accentColor)

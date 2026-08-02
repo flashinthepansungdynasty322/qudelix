@@ -347,21 +347,44 @@ struct QxPresetAssembler {
     /// groups we aren't editing.
     var group: QxEqGroup = .user
 
+    /// Which bytes of `buffer` have actually been filled by a segment.
+    ///
+    /// The segment header alone can't be trusted to say the preset is done:
+    /// `pktIdx == totalPkts` is satisfied by a single segment claiming
+    /// `totalPkts = 0`, which would hand `decode` a buffer that is still mostly
+    /// zeroes and present it as the device's real curve. Completion is decided
+    /// by coverage instead — every byte the group's bitstream occupies must
+    /// have been written. Repeated segments are harmless, and order doesn't
+    /// matter except for segment 0, which restarts the stream (below).
+    private var covered = [Bool](repeating: false, count: 128)
+
     mutating func ingest(_ data: [UInt8]) -> Bool {
         guard data.count >= 7, data[0] == group.rawValue else { return false }
         let totalPkts = Int(data[1] >> 4)
         let pktIdx = Int(data[1] & 0x0F)
+        // A preset never fits in one segment, so totalPkts (the index of the
+        // last segment) is at least 1 for anything genuine.
+        guard totalPkts >= 1, pktIdx <= totalPkts else { return false }
+        // Segment 0 starts a fresh stream: drop whatever a previous, incomplete
+        // one left behind rather than completing on a mix of the two. HID
+        // interrupt reports arrive in order, so a segment 0 after the stream has
+        // begun means the device restarted it, not that packets overtook.
+        if pktIdx == 0 { reset() }
         let offset = Int(data[4]) << 8 | Int(data[5])
         let chunk = Array(data[6...])
         if offset + chunk.count <= buffer.count {
-            for (i, b) in chunk.enumerated() { buffer[offset + i] = b }
+            for (i, b) in chunk.enumerated() {
+                buffer[offset + i] = b
+                covered[offset + i] = true
+            }
         }
-        if pktIdx == totalPkts { complete = true }
+        complete = covered.prefix(group.presetBytes).allSatisfy { $0 }
         return complete
     }
 
     mutating func reset() {
         buffer = [UInt8](repeating: 0, count: 128)
+        covered = [Bool](repeating: false, count: 128)
         complete = false
     }
 }

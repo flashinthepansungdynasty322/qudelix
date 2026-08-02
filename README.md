@@ -54,6 +54,33 @@ If you would rather not trust a binary, build it yourself — see below.
 
 Requires macOS 14 or later. Universal binary, Apple Silicon and Intel.
 
+### Verify your download
+
+Because the app is signed ad-hoc, macOS cannot tell you who built it, and the
+"Open Anyway" click above is pure trust. The checksum published with every
+release is what narrows that gap. Before opening the DMG:
+
+```
+shasum -a 256 ~/Downloads/Qudelix-1.0.1.dmg
+```
+
+Compare the result against the SHA-256 in the [latest release
+notes](../../releases/latest). Or, if you also downloaded the `.dmg.sha256`
+file, let `shasum` do the comparison:
+
+```
+cd ~/Downloads && shasum -a 256 -c Qudelix-1.0.1.dmg.sha256
+```
+
+That should print `OK`. If the hashes differ, or the check fails, do not open
+the file.
+
+Be clear about what this does and does not buy you: it catches a corrupted
+download or an asset replaced after publication, and it lets you confirm two
+people downloaded the same bytes. It is not a substitute for notarization, and
+it assumes the release page you read the hash from is itself genuine. Building
+from source sidesteps all of it.
+
 ## Supported devices
 
 The original **Qudelix 5K** on firmware 3.x, in either 10-band or 20-band EQ

@@ -1,13 +1,16 @@
 import Foundation
 import CoreBluetooth
 
-/// BLE transport for the Qudelix 5K — the officially supported control path
-/// on macOS (the USB HID path crashes the device's USB stack; see docs/).
+/// BLE transport for the Qudelix 5K. Not wired up yet — the app drives the
+/// device over USB HID (see `QudelixController`), because the 5K's BLE endpoint
+/// speaks Qualcomm GAIA and does not accept Qudelix commands directly.
 ///
-/// GATT layout is discovered at runtime and logged. QCC-chip devices usually
-/// expose the Qualcomm GAIA service; Qudelix may use a custom service. We
-/// pick the first service that has both a writable and a notifying
-/// characteristic, subscribe, and speak the same command protocol.
+/// The GATT layout is discovered at runtime and logged. Adoption is deliberately
+/// narrow: only the GAIA service, only its command and response characteristics,
+/// and only when those characteristics really carry the properties their UUIDs
+/// imply. Since every byte of a BLE advertisement is chosen by the advertiser,
+/// the first device to complete a link is pinned by identifier and nothing else
+/// is adopted afterwards — see `pinnedIdentifier`.
 final class BLETransport: NSObject {
     /// Qualcomm GAIA v2/v3 service + endpoints (the likely candidate).
     static let gaiaService = CBUUID(string: "00001100-D102-11E1-9B23-00025B00A5A5")
@@ -57,11 +60,52 @@ final class BLETransport: NSObject {
         p.writeValue(Data(bytes), for: c, type: type)
     }
 
+    /// Identifier of the peripheral this app has already linked with.
+    ///
+    /// Trust on first use. A BLE advertisement is entirely attacker-controlled:
+    /// the local name is a free-form string, and the GAIA service UUID is a
+    /// generic Qualcomm identifier that many unrelated devices expose, so
+    /// "named Qudelix, speaks GAIA" is not an identity. Once a link has been
+    /// established the peripheral's identifier is remembered, and from then on
+    /// nothing else is adopted — a spoofer has to win the very first
+    /// connection, not merely be in radio range later.
+    private static let pinnedKey = "BLEPinnedPeripheral"
+
+    private var pinnedIdentifier: UUID? {
+        get { UserDefaults.standard.string(forKey: Self.pinnedKey).flatMap(UUID.init(uuidString:)) }
+        set { UserDefaults.standard.set(newValue?.uuidString, forKey: Self.pinnedKey) }
+    }
+
+    /// Forget the pinned device — for a "connect to a different 5K" affordance.
+    func forgetPinnedDevice() {
+        UserDefaults.standard.removeObject(forKey: Self.pinnedKey)
+        DebugLog.shared.log("BLE pinned device cleared")
+    }
+
+    /// Whether this peripheral may be adopted at all. Once pinned, identity is
+    /// the only question; before that, the name is a filter and the real check
+    /// happens against the GATT database in `didDiscoverCharacteristicsFor`.
+    private func isAdoptable(_ p: CBPeripheral, advertisedName: String? = nil) -> Bool {
+        if let pinned = pinnedIdentifier { return p.identifier == pinned }
+        let name = advertisedName ?? p.name ?? ""
+        return name.localizedCaseInsensitiveContains("qudelix")
+    }
+
     private func beginScan() {
         DebugLog.shared.log("BLE scanning…")
+        // A known device can be reconnected by identifier without scanning, and
+        // without any name matching being involved.
+        if let pinned = pinnedIdentifier,
+           let known = central.retrievePeripherals(withIdentifiers: [pinned]).first {
+            DebugLog.shared.log("BLE reconnecting to pinned device")
+            adopt(known)
+            return
+        }
         // The 5K may already be connected at the system level — check first.
+        // `withServices:` matches on the generic GAIA UUID, which any Qualcomm
+        // audio device may expose, so the candidate still has to be adoptable.
         let connected = central.retrieveConnectedPeripherals(withServices: [Self.gaiaService])
-        if let p = connected.first {
+        if let p = connected.first(where: { isAdoptable($0) }) {
             DebugLog.shared.log("BLE found system-connected: \(p.name ?? "?")")
             adopt(p)
             return
@@ -93,12 +137,14 @@ extension BLETransport: CBCentralManagerDelegate {
             DebugLog.shared.log("BLE seen: \(name.isEmpty ? "(unnamed)" : name)\(svc) rssi=\(RSSI)")
         }
 
-        // Require both: "5k" alone is a very common substring, and adopting the
-        // wrong peripheral would mean writing Qudelix commands to it.
-        let nameMatch = name.localizedCaseInsensitiveContains("qudelix")
-        let serviceMatch = advServices.isEmpty || advServices.contains(Self.gaiaService)
-        guard nameMatch, serviceMatch else { return }
-        DebugLog.shared.log("BLE discovered Qudelix: \(name) rssi=\(RSSI)")
+        // Everything here is advertiser-controlled, so this is a filter to
+        // decide what is worth connecting to — never a decision that the
+        // peripheral is genuine. That comes from the GATT database below, and
+        // from the pin once one exists. A device that advertises no service
+        // UUIDs at all is still worth probing, since the 5K may not list them.
+        guard isAdoptable(p, advertisedName: name) else { return }
+        guard advServices.isEmpty || advServices.contains(Self.gaiaService) else { return }
+        DebugLog.shared.log("BLE candidate: \(name) rssi=\(RSSI)")
         adopt(p)
     }
 
@@ -141,12 +187,33 @@ extension BLETransport: CBPeripheralDelegate {
         // notifying characteristic" would send this protocol to whatever
         // unrelated endpoint happened to match.
         guard service.uuid == Self.gaiaService else { return }
-        let writable = chars.first { $0.uuid == Self.gaiaCommand }
-        let notifying = chars.first { $0.uuid == Self.gaiaResponse }
+        // The UUID says what a characteristic claims to be; the properties say
+        // what it can actually do. Requiring both means a peripheral that
+        // merely mirrors the GAIA UUIDs back at us doesn't get adopted.
+        let writable = chars.first {
+            $0.uuid == Self.gaiaCommand
+                && !$0.properties.intersection([.write, .writeWithoutResponse]).isEmpty
+        }
+        let notifying = chars.first {
+            $0.uuid == Self.gaiaResponse
+                && !$0.properties.intersection([.notify, .indicate]).isEmpty
+        }
         if let w = writable, let n = notifying, writeChar == nil {
             writeChar = w
             notifyChar = n
             p.setNotifyValue(true, for: n)
+            // CoreBluetooth pairs only when the peripheral demands encryption,
+            // and nothing here can force it. Worth recording which link we got:
+            // an unencrypted one is readable by anyone in range.
+            let encrypted = n.properties
+                .intersection([.notifyEncryptionRequired, .indicateEncryptionRequired])
+            if encrypted.isEmpty {
+                DebugLog.shared.log("BLE link is unencrypted (peripheral does not require pairing)")
+            }
+            if pinnedIdentifier == nil {
+                pinnedIdentifier = p.identifier
+                DebugLog.shared.log("BLE pinned this device for future sessions")
+            }
             DebugLog.shared.log("BLE adopted GAIA link: tx=\(w.uuid) rx=\(n.uuid)")
             onConnected?(p.name ?? "Qudelix 5K")
         }

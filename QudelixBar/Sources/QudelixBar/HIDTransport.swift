@@ -330,25 +330,59 @@ final class DebugLog: ObservableObject {
         }
     }
 
+    /// Escape anything that isn't safely printable on one line.
+    ///
+    /// Log lines carry strings the app did not author — USB product names,
+    /// preset names stored on the device. A newline in one of those forges a
+    /// whole log entry, and a bidi override reorders the line when it is read
+    /// back, so both are rendered as escapes rather than acted on.
+    static func sanitized(_ s: String) -> String {
+        var out = ""
+        for u in s.unicodeScalars {
+            switch u.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator:
+                out += String(format: "\\u{%04X}", u.value)
+            default:
+                out.unicodeScalars.append(u)
+            }
+        }
+        return out
+    }
+
+    /// Append-only handle that refuses to follow a symlink and creates the file
+    /// private to the user. `FileHandle(forWritingTo:)` would happily append
+    /// through a symlink planted at this path, and `Data.write(to:)` creates
+    /// with the process umask (0644 here).
+    private func appendHandle(_ url: URL) -> FileHandle? {
+        let fd = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
+        }
+        guard fd >= 0 else { return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+
+    /// Roll over instead of truncating: the log is what users attach to bug
+    /// reports, and wiping it at the 2 MB mark loses the run that mattered.
+    private func rotate(_ url: URL) {
+        let previous = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: previous)
+        try? FileManager.default.moveItem(at: url, to: previous)
+        bytesWritten = 0
+    }
+
     func log(_ msg: String) {
-        let line = "\(formatter.string(from: Date())) \(msg)"
+        let line = "\(formatter.string(from: Date())) \(Self.sanitized(msg))"
         DispatchQueue.main.async {
             self.lines.append(line)
             if self.lines.count > 200 { self.lines.removeFirst(self.lines.count - 200) }
         }
         guard let url = fileURL, let data = (line + "\n").data(using: .utf8) else { return }
         logQueue.async {
-            // Start a fresh file once it gets large, so it can't grow forever.
-            if self.bytesWritten > Self.maxLogBytes {
-                try? data.write(to: url)
-                self.bytesWritten = data.count
-                return
-            }
-            if let h = try? FileHandle(forWritingTo: url) {
-                h.seekToEndOfFile(); h.write(data); try? h.close()
-            } else {
-                try? data.write(to: url)
-            }
+            if self.bytesWritten > Self.maxLogBytes { self.rotate(url) }
+            guard let h = self.appendHandle(url) else { return }
+            h.write(data)
+            try? h.close()
             self.bytesWritten += data.count
         }
     }

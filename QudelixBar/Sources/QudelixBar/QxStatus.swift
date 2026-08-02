@@ -99,7 +99,7 @@ enum QxStatusParser {
             state.chargerConnected = r.read(1) == 1
             state.charging = r.read(1) == 1
             r.skip(3 + 3 + 1)               // charger_state, dac_state, batt_low
-            state.batteryPercent = r.read(7)
+            state.batteryPercent = min(r.read(7), 100)   // 7 bits carries up to 127
             state.batteryMilliVolts = r.read(13)
             off += 8
         }
@@ -175,14 +175,20 @@ enum QxStatusParser {
         return 8
     }
 
+    /// Widest dB window any of these fields can legitimately report. An int16 at
+    /// dB×60 spans ±546 dB, and a value out at that end makes the volume slider's
+    /// range nonsense; the app's own writes are clamped separately.
+    private static let dbRange = -120.0...24.0
+
     /// cy volume struct (16B): 8 × int16 LE, unit dB*60.
     private static func parseVolBlock(_ d: [UInt8], into state: inout QxDeviceState) {
         func int16LE(_ i: Int) -> Double {
-            Double(Int16(bitPattern: UInt16(d[i]) | UInt16(d[i + 1]) << 8))
+            let raw = Double(Int16(bitPattern: UInt16(d[i]) | UInt16(d[i + 1]) << 8)) / QxScale.volume
+            return min(max(raw, dbRange.lowerBound), dbRange.upperBound)
         }
-        state.volumeDb = int16LE(0) / QxScale.volume
-        state.volumeLimitDb = int16LE(2) / QxScale.volume
-        state.trimLeftDb = int16LE(6) / QxScale.volume
-        state.trimRightDb = int16LE(8) / QxScale.volume
+        state.volumeDb = int16LE(0)
+        state.volumeLimitDb = int16LE(2)
+        state.trimLeftDb = int16LE(6)
+        state.trimRightDb = int16LE(8)
     }
 }

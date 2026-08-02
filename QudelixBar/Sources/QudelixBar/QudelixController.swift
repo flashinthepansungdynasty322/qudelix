@@ -140,8 +140,10 @@ final class QudelixController: ObservableObject {
     /// report-ID byte is already stripped by HIDTransport.
     private func handlePacket(_ bytes: [UInt8]) {
         guard bytes.count >= 3 else { return }
-        receivingReports = true
         guard let (cmdId, data) = QxPacket.parseRx(bytes) else { return }
+        // Only a packet we could actually parse counts as the device answering;
+        // otherwise stray garbage cancels the handshake retry at `start()`.
+        receivingReports = true
         dispatch(cmdId, data)
     }
 
@@ -179,8 +181,8 @@ final class QudelixController: ObservableObject {
             let group = data[1]
             guard group == eqGroup.rawValue || data[0] == 129 else { return }
             switch data[0] {
-            case 129: if data.count >= 3 { activePreset = Int(data[2]) }  // eqPresetIdx
-            case 130: if data.count >= 3 { eqEnabled = data[2] != 0 }     // eqEnable
+            case 129: if data.count >= 3 { setActivePreset(Int(data[2])) }  // eqPresetIdx
+            case 130: if data.count >= 3 { eqEnabled = data[2] != 0 }       // eqEnable
             default: break
             }
         } else {
@@ -200,12 +202,34 @@ final class QudelixController: ObservableObject {
     private func parsePresetName(_ data: [UInt8]) {
         guard data.count >= 3, data[0] == eqGroup.rawValue else { return }
         let idx = Int(data[1])
+        guard (0..<Self.presetCount).contains(idx) else { return }
         let end = min(Int(data[2]), data.count)
         guard end > 3 else { return }
         let nameBytes = data[3..<end].prefix { $0 != 0 }
-        if let name = String(bytes: nameBytes, encoding: .utf8), !name.isEmpty {
-            presetNames[idx] = name
+        guard let raw = String(bytes: nameBytes, encoding: .utf8) else { return }
+        let name = Self.displayName(raw)
+        if !name.isEmpty { presetNames[idx] = name }
+    }
+
+    /// Longest preset name the popover will show. The device's own field is
+    /// bounded by the report size; this is about the row staying one line.
+    nonisolated static let maxPresetNameLength = 32
+
+    /// Names are stored on the device, so they are attacker-supplied in the
+    /// same sense every other field is. Control and format scalars are dropped
+    /// rather than escaped — a U+202E override would visually reorder the rows
+    /// around it, and a newline would stretch the row.
+    nonisolated static func displayName(_ s: String) -> String {
+        let kept = s.unicodeScalars.filter { u in
+            switch u.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: return false
+            default: return true
+            }
         }
+        return String(String.UnicodeScalarView(kept))
+            .trimmingCharacters(in: .whitespaces)
+            .prefix(maxPresetNameLength)
+            .trimmingCharacters(in: .whitespaces)
     }
 
     /// Decide whether we may write to this device, from what the handshake told
@@ -246,12 +270,16 @@ final class QudelixController: ObservableObject {
         charging = state.charging
         if let sr = state.sampleRateLabel { sampleRate = sr }
         if let src = state.inputSourceLabel { inputSource = src }
-        if let v = state.volumeDb { volumeDb = v }
         if let m = state.usbMute { muted = m }
         if let en = state.eqEnabled { eqEnabled = en }
-        if let idx = state.eqPresetIdx { activePreset = idx }
+        if let idx = state.eqPresetIdx { setActivePreset(idx) }
         volumeMax = state.dacOutPwr2Vrms ? min(state.volumeLimitDb ?? 6, 6)
                                          : min(state.volumeLimitDb ?? 0, 0)
+        // After volumeMax, so the slider's value always sits inside its range —
+        // the device reports level and limit independently and can disagree.
+        if let v = state.volumeDb {
+            volumeDb = min(max(v, volumeRange.lowerBound), volumeRange.upperBound)
+        }
 
         let compat: String
         switch compatibility {
@@ -285,8 +313,19 @@ final class QudelixController: ObservableObject {
             DebugLog.shared.log("preset decode implausible for group \(eqGroup) — ignoring")
             return
         }
-        preGain = p.preGain
-        bands = p.bands
+        // `looksPlausible` is deliberately wider than the editor's range, so a
+        // real device reporting a curve we can't represent still shows up
+        // instead of being discarded. Clamp it to what the sliders can express
+        // and what `updateBand` would write back, so the displayed and exported
+        // curve is one we could actually reproduce.
+        preGain = min(max(p.preGain, -12), 12)
+        bands = p.bands.map { band in
+            var v = band
+            v.freq = max(20, min(20000, v.freq))
+            v.gain = v.gain.isFinite ? max(-12, min(12, v.gain)) : 0
+            v.q = v.q.isFinite ? max(0.1, min(10, v.q)) : 1.0
+            return v
+        }
     }
 
     #if DEBUG
@@ -297,9 +336,27 @@ final class QudelixController: ObservableObject {
     }
     #endif
 
+    /// The device reports which preset slot is active. Out-of-range values are
+    /// dropped rather than stored: nothing indexes an array with this, but a
+    /// bogus index silently un-highlights every row.
+    private func setActivePreset(_ idx: Int) {
+        guard (0..<Self.presetCount).contains(idx) else { return }
+        activePreset = idx
+    }
+
+    /// Rate limit for EQ-group switches. Each switch clears the cached preset
+    /// names and re-requests up to 20 of them, and every send costs ~20 ms of
+    /// transport queue time — so a device flipping `dd.eq_mode` in a loop can
+    /// starve the user's own volume and EQ writes. Real mode changes are a
+    /// human action; one per second is generous.
+    private var lastGroupSwitch = Date.distantPast
+    private static let groupSwitchInterval: TimeInterval = 1
+
     /// Re-target the EQ when the device reports a different mode.
     private func setEqGroup(_ group: QxEqGroup) {
         guard group != eqGroup else { return }
+        guard Date().timeIntervalSince(lastGroupSwitch) >= Self.groupSwitchInterval else { return }
+        lastGroupSwitch = Date()
         DebugLog.shared.log("EQ group → \(group) (\(group.bandCount) bands)")
         eqGroup = group
         assembler.group = group

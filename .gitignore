@@ -71,6 +71,7 @@ DerivedData/
 # not committed, so the repository stays small and clonable.
 Qudelix.app/
 *.dmg
+*.dmg.sha256
 
 # Generated while making the icon
 AppIcon.iconset/

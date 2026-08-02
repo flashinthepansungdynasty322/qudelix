@@ -109,7 +109,7 @@ struct AutoEqEntry: Identifiable, Hashable {
         guard !leaf.isEmpty else { return nil }
         guard let url = URL(string: "\(AutoEqIndex.root)/\(path)/\(leaf)%20ParametricEQ.txt"),
               url.scheme == "https",
-              url.host == "raw.githubusercontent.com",
+              url.host == AutoEqIndex.host,
               url.absoluteString.hasPrefix(AutoEqIndex.root + "/") else { return nil }
         return url
     }
@@ -159,12 +159,65 @@ final class AutoEqIndex: ObservableObject {
     nonisolated static let maxIndexBytes = 12_000_000
     nonisolated static let maxPresetBytes = 200_000
 
-    nonisolated static var session: URLSession {
+    /// Refuses to follow a redirect off the one host we trust.
+    ///
+    /// Nothing sensitive travels with these requests — the session is ephemeral
+    /// and carries no cookies or credentials — but the host check in
+    /// `presetURL` is worth nothing if a 302 can move the request afterwards.
+    private final class HostPinnedRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            guard request.url?.host == AutoEqIndex.host, request.url?.scheme == "https" else {
+                completionHandler(nil)
+                return
+            }
+            completionHandler(request)
+        }
+    }
+
+    nonisolated static let host = "raw.githubusercontent.com"
+    private nonisolated static let redirectPolicy = HostPinnedRedirects()
+
+    /// One shared session. A computed property would build a fresh `URLSession`
+    /// per fetch, and a session retains itself until it is invalidated — which
+    /// never happens here — so every index load and preset import would leak it
+    /// along with its delegate queue.
+    nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 20
         cfg.timeoutIntervalForResource = 60
         cfg.httpAdditionalHeaders = ["Accept": "text/plain"]
-        return URLSession(configuration: cfg)
+        return URLSession(configuration: cfg, delegate: redirectPolicy, delegateQueue: nil)
+    }()
+
+    /// Download with a hard ceiling that is enforced *while* the body arrives.
+    ///
+    /// `session.data(from:)` buffers the whole response before returning, so a
+    /// size check on its result only rejects a body already sitting in memory.
+    /// Streaming lets us stop reading — and cancel — the moment a response runs
+    /// past what a preset or the index could plausibly be.
+    nonisolated static func fetch(_ url: URL, limit: Int) async throws -> Data {
+        let (stream, response) = try await session.bytes(from: url)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            stream.task.cancel()
+            throw URLError(.badServerResponse)
+        }
+        if http.expectedContentLength > Int64(limit) {
+            stream.task.cancel()
+            throw URLError(.dataLengthExceedsMaximum)
+        }
+        var data = Data()
+        data.reserveCapacity(min(limit, 1 << 16))
+        for try await byte in stream {
+            data.append(byte)
+            if data.count > limit {
+                stream.task.cancel()
+                throw URLError(.dataLengthExceedsMaximum)
+            }
+        }
+        return data
     }
 
     #if DEBUG
@@ -181,13 +234,7 @@ final class AutoEqIndex: ObservableObject {
         state = .loading
         Task {
             do {
-                let (data, response) = try await Self.session.data(from: Self.indexURL)
-                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                    throw URLError(.badServerResponse)
-                }
-                guard data.count <= Self.maxIndexBytes else {
-                    throw URLError(.dataLengthExceedsMaximum)
-                }
+                let data = try await Self.fetch(Self.indexURL, limit: Self.maxIndexBytes)
                 guard let text = String(data: data, encoding: .utf8) else {
                     throw URLError(.cannotDecodeContentData)
                 }
@@ -234,11 +281,7 @@ final class AutoEqIndex: ObservableObject {
     /// Download and parse one entry's parametric EQ.
     nonisolated static func fetchPreset(_ entry: AutoEqEntry) async throws -> ParametricEQFile {
         guard let url = entry.presetURL else { throw URLError(.badURL) }
-        let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
-        }
-        guard data.count <= maxPresetBytes else { throw URLError(.dataLengthExceedsMaximum) }
+        let data = try await fetch(url, limit: maxPresetBytes)
         guard let text = String(data: data, encoding: .utf8),
               let parsed = ParametricEQFile.parse(text) else {
             throw URLError(.cannotParseResponse)
