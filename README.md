@@ -93,23 +93,11 @@ no third-party dependencies.
 - Only EQ, volume, and preset settings are written to the device — the same
   things the official app writes. Firmware is never touched.
 
-## Protocol notes
-
-The 5K's USB protocol is documented in [`docs/`](docs/), reverse-engineered for
-interoperability from Qudelix's own browser app:
-
-- [`FINDINGS.md`](docs/FINDINGS.md) — transports, HID report layout, EQ groups,
-  and the report-ID gotcha that makes the device fall off the USB bus
-- [`PROTOCOL_STATUS.md`](docs/PROTOCOL_STATUS.md) — status/config bitfield
-  structs, notifications, and preset formats
-
-These may be useful to anyone writing their own Qudelix tooling.
-
-### Developer tools
+## Developer tools
 
 `Sources/qxusb` and `Sources/qxprobe` are diagnostic CLIs, not part of the app.
 They can destabilise a device if misused — `qxusb --noid` deliberately
-reproduces the bus-drop failure, and `qxprobe` sends Bluetooth GAIA commands.
+reproduces a USB bus-drop failure, and `qxprobe` sends Bluetooth GAIA commands.
 Read the source before running them.
 
 ## Known limitations
