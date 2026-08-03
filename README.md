@@ -64,7 +64,7 @@ Because the app is signed ad-hoc, macOS cannot tell you who built it, and the
 release is what narrows that gap. Before opening the DMG:
 
 ```
-shasum -a 256 ~/Downloads/Qudelix-1.0.1.dmg
+shasum -a 256 ~/Downloads/Qudelix-1.1.0.dmg
 ```
 
 Compare the result against the SHA-256 in the [latest release
@@ -72,7 +72,7 @@ notes](../../releases/latest). Or, if you also downloaded the `.dmg.sha256`
 file, let `shasum` do the comparison:
 
 ```
-cd ~/Downloads && shasum -a 256 -c Qudelix-1.0.1.dmg.sha256
+cd ~/Downloads && shasum -a 256 -c Qudelix-1.1.0.dmg.sha256
 ```
 
 That should print `OK`. If the hashes differ, or the check fails, do not open
