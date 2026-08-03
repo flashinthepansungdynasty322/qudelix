@@ -125,6 +125,10 @@ final class BLETransport: NSObject {
         }
     }
 
+    /// Drop anything queued but not yet flushed. Used when the controller moves
+    /// to the other transport, so a stale write cannot arrive afterwards.
+    func clearPending() { pending = [:] }
+
     /// Identifier of the peripheral this app has already linked with.
     ///
     /// Trust on first use. A BLE advertisement is entirely attacker-controlled:
@@ -143,6 +147,20 @@ final class BLETransport: NSObject {
 
     var hasPinnedDevice: Bool { pinnedIdentifier != nil }
 
+    /// A device the user just asked us to forget, held back briefly so it cannot
+    /// immediately re-pin itself.
+    ///
+    /// `cancelPeripheralConnection` only drops *our* connection; the 5K normally
+    /// stays connected to the system as an audio device, so
+    /// `retrieveConnectedPeripherals` hands it straight back — ahead of any
+    /// advertisement — and with the pin gone it would be adopted and re-pinned.
+    /// Pressing Forget repeatedly could never escape that. The exclusion expires
+    /// so that forgetting the only 5K in the room doesn't disable Bluetooth
+    /// until relaunch: a different device gets first refusal, and if none turns
+    /// up we go back to the original.
+    private var shunned: (id: UUID, until: Date)?
+    private static let shunWindow: TimeInterval = 60
+
     /// Drop the current link and go back to scanning, so a newly-unpinned device
     /// can be replaced by another one without relaunching.
     func disconnectAndRescan() {
@@ -160,14 +178,22 @@ final class BLETransport: NSObject {
 
     /// Forget the pinned device, so the next adoptable one becomes the new pin.
     func forgetPinnedDevice() {
+        if let id = peripheral?.identifier ?? pinnedIdentifier {
+            shunned = (id, Date().addingTimeInterval(Self.shunWindow))
+        }
         UserDefaults.standard.removeObject(forKey: Self.pinnedKey)
-        DebugLog.shared.log("BLE pinned device cleared")
+        DebugLog.shared.log("BLE pinned device cleared; giving another device "
+            + "\(Int(Self.shunWindow))s of priority")
     }
 
     /// Whether this peripheral may be adopted at all. Once pinned, identity is
     /// the only question; before that, the name is a filter and the real check
     /// happens against the GATT database in `didDiscoverCharacteristicsFor`.
     private func isAdoptable(_ p: CBPeripheral, advertisedName: String? = nil) -> Bool {
+        if let s = shunned {
+            if Date() >= s.until { shunned = nil }            // exclusion expired
+            else if p.identifier == s.id { return false }
+        }
         if let pinned = pinnedIdentifier { return p.identifier == pinned }
         let name = advertisedName ?? p.name ?? ""
         return name.localizedCaseInsensitiveContains("qudelix")
@@ -377,6 +403,7 @@ extension BLETransport: CBPeripheralDelegate {
             }
             if pinnedIdentifier == nil {
                 pinnedIdentifier = p.identifier
+                if shunned?.id != p.identifier { shunned = nil }
                 DebugLog.shared.log("BLE pinned this device for future sessions")
             }
             connectTimeout?.cancel()

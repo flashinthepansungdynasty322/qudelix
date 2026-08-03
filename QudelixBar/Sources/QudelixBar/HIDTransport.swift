@@ -45,6 +45,9 @@ final class HIDTransport {
     var onInputReport: ((Int, [UInt8]) -> Void)?
     var onDeviceConnected: ((String) -> Void)?
     var onDeviceRemoved: (() -> Void)?
+    /// Fired when the TX breaker trips: the interface is still attached but the
+    /// device has stopped accepting reports, so this link is no longer usable.
+    var onLinkUnusable: (() -> Void)?
 
     var isOpen: Bool { attachedDevice != nil }
 
@@ -170,6 +173,10 @@ final class HIDTransport {
 
     private func deviceDetached(_ dev: IOHIDDevice) {
         guard attachedDevice === dev else { return }
+        // IOKit holds `inputBuffer` and an unretained `self`; unhook both rather
+        // than relying on this object outliving the device.
+        IOHIDDeviceRegisterInputReportCallback(dev, inputBuffer, Self.inputBufferSize, nil, nil)
+        IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
         attachedDevice = nil
         queue.async { self.device = nil }
         DebugLog.shared.log("HID removed")
@@ -178,6 +185,7 @@ final class HIDTransport {
 
     /// Queue-owned.
     private var consecutiveTxErrors = 0
+    private static let txErrorLimit = 5
 
     /// Coalescing: a slider drag emits ~60 updates/second, and every send costs
     /// ~20 ms of queue time, so naive queueing would keep writing to the device
@@ -222,7 +230,7 @@ final class HIDTransport {
     /// Must be called on `queue`.
     private func sendNow(_ cmd: QxCmd, _ data: [UInt8]) {
         guard let dev = device else { return }
-        guard consecutiveTxErrors < 5 else { return }  // circuit breaker
+        guard consecutiveTxErrors < Self.txErrorLimit else { return }  // circuit breaker
         let report = QxPacket.txReport(cmd, data, reportSize: outputReportSize)
         guard !report.isEmpty else {
             DebugLog.shared.log("TX skipped: report size \(outputReportSize) too small for \(cmd)")
@@ -233,8 +241,15 @@ final class HIDTransport {
         let result = setReport(dev, id: outputReportID, bytes: buffer)
         if result != kIOReturnSuccess {
             consecutiveTxErrors += 1
+            let tripped = consecutiveTxErrors == Self.txErrorLimit
             DebugLog.shared.log("TX error 0x\(String(format: "%08X", UInt32(bitPattern: result))) cmd=\(cmd)"
-                + (consecutiveTxErrors >= 5 ? " — suspending TX until reattach" : ""))
+                + (consecutiveTxErrors >= Self.txErrorLimit ? " — suspending TX until reattach" : ""))
+            if tripped {
+                // Announce it once. Silently dropping writes while every control
+                // stayed enabled was the worst possible presentation: the app
+                // looked connected and did nothing.
+                DispatchQueue.main.async { [weak self] in self?.onLinkUnusable?() }
+            }
         } else {
             consecutiveTxErrors = 0
         }

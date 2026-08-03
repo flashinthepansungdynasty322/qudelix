@@ -95,7 +95,10 @@ struct DeviceHeader: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(deviceName).font(.system(size: 13, weight: .semibold))
+                Text(deviceName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 HStack(spacing: 4) {
                     if let icon = linkIcon {
                         Image(systemName: icon)
@@ -139,8 +142,13 @@ struct DeviceHeader: View {
         return false
     }
     private var deviceName: String {
-        if case .connected(let n) = controller.connection { return n.replacingOccurrences(of: " USB DAC 96KHz", with: "") }
-        return "Qudelix"
+        guard case .connected(let n) = controller.connection else { return "Qudelix" }
+        // Device-supplied: the USB product string or the BLE advertised name. The
+        // same sanitiser the preset names use — a 500-character or bidi-override
+        // product name would otherwise distort the header.
+        let cleaned = QudelixController.displayName(
+            n.replacingOccurrences(of: " USB DAC 96KHz", with: ""))
+        return cleaned.isEmpty ? "Qudelix" : cleaned
     }
     /// Which link is carrying the protocol. Worth surfacing: the two behave
     /// differently — USB is faster and always available, Bluetooth works away
@@ -301,7 +309,13 @@ struct BandRow: View {
     @Binding var editingBand: Int?
 
     var body: some View {
-        let band = controller.bands[index]
+        // The device chooses the band count: a reported eq_mode change swaps
+        // `bands` between 10 and 20 entries underneath the view. An in-flight
+        // AppKit control — a slider mid-drag, a text field losing focus — can
+        // fire its setter after the row it belongs to has gone, so neither the
+        // read here nor the one in `set` may assume this index still exists.
+        let band = controller.bands.indices.contains(index)
+            ? controller.bands[index] : QxEqBandValue()
         GridRow {
             Text("\(index + 1)")
                 .font(.system(size: 9).monospacedDigit())
@@ -349,6 +363,7 @@ struct BandRow: View {
     /// Mutate one field of this band and push it to the device.
     private func set<T>(_ apply: @escaping (inout QxEqBandValue, T) -> Void) -> (T) -> Void {
         { newValue in
+            guard controller.bands.indices.contains(index) else { return }
             var b = controller.bands[index]
             apply(&b, newValue)
             controller.updateBand(index, b)

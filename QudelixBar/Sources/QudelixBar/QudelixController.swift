@@ -104,6 +104,9 @@ final class QudelixController: ObservableObject {
     private var state = QxDeviceState()
     private var requestedNames = false
     private var handshakeAttempt = 0
+    /// Bumped on every connect so retry Tasks from a previous episode retire
+    /// instead of reviving against the freshly-zeroed attempt counter.
+    private var handshakeGeneration = 0
 
     func start() {
         hid.onDeviceConnected = { [weak self] name in
@@ -111,6 +114,9 @@ final class QudelixController: ObservableObject {
                 guard let self else { return }
                 self.usbWired = true
                 self.link = .usb                     // USB takes over from BLE
+                // Anything queued for the old link would otherwise be delivered
+                // over it up to a coalescing window later.
+                self.ble.clearPending()
                 self.deviceConnected(name)
             }
         }
@@ -134,6 +140,17 @@ final class QudelixController: ObservableObject {
         // flip `compatibility`, or an eq_mode change that makes us re-request
         // presets *over USB*. The write path is gated on `link`; the read path
         // has to be too.
+        hid.onLinkUnusable = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.link == .usb else { return }
+                DebugLog.shared.log("USB stopped accepting reports — releasing the link")
+                self.link = .none
+                self.connection = .disconnected
+                self.resetDeviceState()
+                // A healthy Bluetooth link may be sitting right there.
+                if self.ble.isConnected { self.adoptBluetooth() }
+            }
+        }
         hid.onInputReport = { [weak self] _, bytes in
             Task { @MainActor in
                 guard let self, self.link == .usb else { return }
@@ -164,6 +181,7 @@ final class QudelixController: ObservableObject {
 
         hid.start()
         ble.start()
+        hasPinnedBluetoothDevice = ble.hasPinnedDevice
     }
 
     /// Clear everything that describes the device we were talking to. Used on
@@ -192,6 +210,8 @@ final class QudelixController: ObservableObject {
         // would address the *previous* device's group until the new eq_mode
         // arrives a round trip later. Back to the 10-band default, which is what
         // an unidentified device is assumed to be.
+        volumeDb = -30
+        volumeMax = 0
         eqGroup = .user
         assembler.group = .user
         assembler.reset()
@@ -202,12 +222,15 @@ final class QudelixController: ObservableObject {
     }
 
     /// Whether a Bluetooth device is remembered, so the UI can offer to forget it.
-    var hasPinnedBluetoothDevice: Bool { ble.hasPinnedDevice }
+    /// Published rather than computed: read straight from UserDefaults it never
+    /// told SwiftUI to redraw, so the button stayed on screen after being used.
+    @Published private(set) var hasPinnedBluetoothDevice = false
 
     /// Forget the remembered Bluetooth device and start looking again. Drops the
     /// current link if it is the Bluetooth one, so the next device can be adopted.
     func forgetBluetoothDevice() {
         ble.forgetPinnedDevice()
+        hasPinnedBluetoothDevice = ble.hasPinnedDevice
         if link == .bluetooth {
             link = .none
             connection = .disconnected
@@ -218,6 +241,7 @@ final class QudelixController: ObservableObject {
 
     private func adoptBluetooth() {
         link = .bluetooth
+        hasPinnedBluetoothDevice = ble.hasPinnedDevice
         DebugLog.shared.log("link → bluetooth (vendor \(ble.vendor.label))")
         // The popover shows the link with its own icon, so the name stays clean.
         deviceConnected("Qudelix 5K")
@@ -226,6 +250,7 @@ final class QudelixController: ObservableObject {
     private func deviceConnected(_ name: String) {
         connection = .connected(name: name)
         handshakeAttempt = 0
+        handshakeGeneration += 1
         // Everything describing the device belongs to the link we are now on, so
         // none of it may carry over. Keeping `compatibility` would authorise
         // writes to a device this link has never identified, and keeping
@@ -241,11 +266,13 @@ final class QudelixController: ObservableObject {
 
     private func sendHandshake() {
         handshakeAttempt += 1
+        let generation = handshakeGeneration
         // If the burst is lost the popover would sit blank until replug, so
         // retry a couple of times until the device answers.
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(2))
-            guard let self, !self.receivingReports, self.handshakeAttempt < 3,
+            guard let self, generation == self.handshakeGeneration,
+                  !self.receivingReports, self.handshakeAttempt < 3,
                   case .connected = self.connection else { return }
             DebugLog.shared.log("no response — retrying handshake (\(self.handshakeAttempt + 1))")
             self.sendHandshake()
@@ -409,6 +436,18 @@ final class QudelixController: ObservableObject {
             volumeDb = min(max(v, volumeRange.lowerBound), volumeRange.upperBound)
         }
 
+        // Consume the fields the user can also change locally. `state` is
+        // cumulative and applyState runs after *every* packet, so leaving these
+        // set meant an unrelated push — a battery notification, say — re-applied
+        // the last polled volume and mute over an edit the user had just made,
+        // snapping the slider back mid-drag and flipping the EQ switch back on.
+        // Config values (volumeLimitDb, dacOutPwr2Vrms) are deliberately kept,
+        // because volumeMax is recomputed from them on every pass.
+        state.volumeDb = nil
+        state.usbMute = nil
+        state.eqEnabled = nil
+        state.eqPresetIdx = nil
+
         let compat: String
         switch compatibility {
         case .checking: compat = "checking"
@@ -417,7 +456,7 @@ final class QudelixController: ObservableObject {
         }
         DebugLog.shared.log("compat=\(compat) model=\(state.deviceId) eqMode=\(state.eqMode.map(String.init) ?? "?")")
         DebugLog.shared.log("state: fw=\(firmwareVersion ?? "?") batt=\(batteryPercent.map { "\($0)%" } ?? "?")"
-            + " vol=\(state.volumeDb.map { String(format: "%.1fdB", $0) } ?? "?")"
+            + " vol=\(String(format: "%.1fdB", volumeDb))"
             + " max=\(String(format: "%.0f", volumeMax)) sr=\(sampleRate ?? "?") src=\(inputSource ?? "?")"
             + " eq=\(eqEnabled ? "on" : "off") preset=\(activePreset.map(String.init) ?? "?")"
             + " nameMask=\(String(state.presetNameMask, radix: 2))")
@@ -617,6 +656,7 @@ final class QudelixController: ObservableObject {
         setPreGain(max(-12, min(12, file.preamp)))
 
         for i in 0..<bandCount {
+            guard bands.indices.contains(i) else { break }
             if i < file.bands.count {
                 var b = file.bands[i]
                 b.gain = max(-12, min(12, b.gain))
