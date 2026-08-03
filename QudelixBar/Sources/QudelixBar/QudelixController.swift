@@ -181,10 +181,24 @@ final class QudelixController: ObservableObject {
         muted = false
         activePreset = nil
         presetNames = [:]
+        lastImportSummary = nil
         requestedNames = false
         pendingGroup = nil
         state = QxDeviceState()
+
+        // The EQ belongs to the device too. `eqGroup` in particular reaches the
+        // wire — it is the group byte on every EQ write and the mask on the
+        // preset request the handshake sends — so carrying it across a handover
+        // would address the *previous* device's group until the new eq_mode
+        // arrives a round trip later. Back to the 10-band default, which is what
+        // an unidentified device is assumed to be.
+        eqGroup = .user
+        assembler.group = .user
         assembler.reset()
+        lastGroupSwitch = .distantPast   // don't let the rate limit defer the first real switch
+        bands = QxEq.defaultFreqs.map { QxEqBandValue(filter: .peak, freq: $0, gain: 0, q: 1.0) }
+        preGain = 0
+        eqEnabled = true
     }
 
     /// Whether a Bluetooth device is remembered, so the UI can offer to forget it.
