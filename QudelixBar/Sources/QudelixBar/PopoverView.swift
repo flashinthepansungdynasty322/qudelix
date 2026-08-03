@@ -10,12 +10,14 @@ struct PopoverView: View {
         case equalizer = "Equalizer"
         case presets = "Presets"
         case importing = "Import"
+        case tune = "Tune"
         var id: String { rawValue }
         var icon: String {
             switch self {
             case .equalizer: return "slider.horizontal.3"
             case .presets: return "square.stack"
             case .importing: return "arrow.down.circle"
+            case .tune: return "ear"
             }
         }
     }
@@ -52,6 +54,7 @@ struct PopoverView: View {
                     case .equalizer: EqEditorView(editingBand: $editingBand)
                     case .presets: PresetsView()
                     case .importing: ImportView()
+                    case .tune: TuneView()
                     }
                 }
                 .padding(14)
