@@ -21,9 +21,9 @@ right.
 
 ## Screenshots
 
-| Equalizer | Presets | Import |
-|---|---|---|
-| ![Equalizer](docs/screenshots/equalizer.png) | ![Presets](docs/screenshots/presets.png) | ![Import](docs/screenshots/import.png) |
+| Equalizer | Presets | Import | Tune |
+|---|---|---|---|
+| ![Equalizer](docs/screenshots/equalizer.png) | ![Presets](docs/screenshots/presets.png) | ![Import](docs/screenshots/import.png) | ![Tune](docs/screenshots/tune.png) |
 
 ## Features
 
@@ -36,6 +36,7 @@ right.
 - **Preset import** from a file, or from the
   [AutoEq](https://github.com/jaakkopasanen/AutoEq) database (6,000+ headphones)
 - **Export** your EQ in the standard parametric format
+- **Tune** — find the EQ you actually prefer, by ear (see below)
 - **Diagnostics panel** logging every packet exchanged with the device
 
 Works over **USB or Bluetooth**. USB is used whenever the 5K is plugged in;
@@ -98,6 +99,52 @@ silently doing the wrong thing:
 | 5K Plus, T71, Aura Vita | different EQ command set |
 | Firmware 2.x | Qudelix changed the command format in firmware 3 |
 | Firmware 1.x | too old; the official app refuses these too |
+
+## Tune
+
+EQ is personal, and reading a frequency-response graph tells you very little about
+what you will enjoy. The **Tune** tab offers two ways to settle it by ear.
+
+![Tune](docs/screenshots/tune.png)
+
+### Compare
+
+Blind A/B. Play music you know well, and the app presents two EQ settings; you
+pick whichever sounds better. It narrows down from there, over roughly twenty
+comparisons, and ends with a curve you can keep or save to a preset.
+
+1. Start playing music at a comfortable volume, and leave the volume alone.
+2. Open **Tune → Compare → Start**.
+3. Use **Switch** to flip between A and B as often as you like, then **Prefer A**
+   or **Prefer B**. If they genuinely sound the same, say so — that answer is
+   used, not discarded.
+4. At the end, **Keep** the result or **Save to…** a preset slot. **Discard**
+   restores exactly what you had.
+
+Both options are always matched for loudness and never labelled, so you cannot
+simply prefer the louder one — which is what happens in most casual A/B tests.
+Some pairs are deliberately identical, as a check on how reliable the session was.
+
+### Tones
+
+Plays faint tones at ten frequencies and finds the quietest level you can hear at
+each, then compares that with typical hearing.
+
+1. Set a comfortable volume, and sit somewhere quiet.
+2. Open **Tune → Tones → Start**.
+3. Press **I hear it** (or the space bar) the moment you hear anything, however
+   faint. Roughly one presentation in five is silent on purpose.
+4. If the result shows a real difference across the range, **Apply** writes a
+   correction. If it does not, the app says so and leaves your EQ alone.
+
+Tones stay quiet throughout, and the EQ is switched off while measuring so the
+measurement is of you and your headphones rather than of your EQ settings.
+
+Two honest caveats. Without laboratory calibration this measures your ears and
+your headphones together, so it is specific to that pairing and is **not** a
+hearing test in any medical sense — if you are worried about your hearing, see an
+audiologist. And for most people with ordinary hearing the answer is "nothing to
+correct", which the app will tell you plainly rather than inventing a curve.
 
 ## Build from source
 
