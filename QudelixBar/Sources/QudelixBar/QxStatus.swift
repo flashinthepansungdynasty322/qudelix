@@ -56,8 +56,17 @@ enum QxStatusParser {
         "Hybrid fast roll-off", "NOS (88.2/96 kHz only)",
     ]
 
-    /// RspInitData: [devId u16 BE][status u8 == 3][8B fw version bitfield]
-    /// [devStatus block][devConfig block][warranty 4B][usbMute]
+    /// RspInitData — device id, status byte, and the firmware version.
+    ///
+    /// The reply also carries status and config blocks after the version, but
+    /// they are deliberately not read here. Finding where they start depends on a
+    /// length the reply reports about itself, and when that disagrees with the
+    /// bytes actually sent, every field after it is read from the wrong place —
+    /// quietly, with plausible-looking results rather than an error.
+    ///
+    /// Nothing is lost by skipping them: the handshake requests the same data
+    /// explicitly a moment later, and each of those replies carries a single
+    /// block whose layout is unambiguous.
     static func parseInitData(_ d: [UInt8], into state: inout QxDeviceState) -> Bool {
         guard d.count >= 11 else { return false }
         let devId = Int(d[0]) << 8 | Int(d[1])
@@ -69,10 +78,6 @@ enum QxStatusParser {
         state.fwVersion = "\(major).\(minor).\(rev)"
         state.fwMajor = major
         state.fwMinor = minor
-
-        var off = 11
-        off += parseDevStatus(d.tail(from: off), into: &state)
-        _ = parseDevConfig(d.tail(from: off), into: &state)
         return true
     }
 
