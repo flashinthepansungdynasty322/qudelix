@@ -3,11 +3,16 @@ import SwiftUI
 
 /// Connection + device state, and all user actions.
 ///
-/// Transport: USB HID over the vendor-defined interface — full duplex, the
-/// device answers every request and pushes notifications unprompted.
+/// Two transports carry the same protocol, and both are live:
 ///
-/// BLETransport exists but is not used: the 5K's BLE endpoint speaks Qualcomm
-/// GAIA and does not accept Qudelix commands directly (see docs/FINDINGS.md).
+/// - USB HID over the vendor-defined interface — full duplex, the device answers
+///   every request and pushes notifications unprompted.
+/// - Bluetooth LE, where the identical `[cmd, data…]` packets are tunnelled
+///   inside Qualcomm GAIA frames under Qudelix's own vendor id (`BLETransport`).
+///
+/// USB wins whenever it is present; Bluetooth takes over otherwise. Everything
+/// above the transport is shared, because both deliver packets in the same
+/// `[len, cmdHi, cmdLo, payload…]` shape.
 ///
 /// UI state is optimistic: writes apply locally immediately; device pushes
 /// (notifications) overwrite local state when they arrive.
@@ -35,13 +40,13 @@ final class QudelixController: ObservableObject {
     @Published var compatibility: Compatibility = .checking
 
     @Published var connection: ConnectionState = .disconnected
-    @Published var usbWired = false           // USB presence (audio path), not control
+    @Published var usbWired = false           // the USB control interface is attached
     @Published var firmwareVersion: String?
     @Published var batteryPercent: Int?
     @Published var charging = false
     @Published var sampleRate: String?
     @Published var inputSource: String?
-    @Published var receivingReports = false   // true once the device answers over BLE
+    @Published var receivingReports = false   // true once the active link answers
 
     // Volume (dB). 60 dB window; max is 0 dB (or +6 in 2 Vrms mode).
     @Published var volumeDb: Double = -30
@@ -71,6 +76,30 @@ final class QudelixController: ObservableObject {
     var bandCount: Int { eqGroup.bandCount }
 
     private let hid = HIDTransport()
+    private let ble = BLETransport()
+
+    /// Which link is carrying the protocol right now. USB wins when both are
+    /// available: it is faster, needs no pairing, and is the better-tested path.
+    enum Link: String { case none, usb, bluetooth }
+    @Published private(set) var link: Link = .none
+
+    /// Single choke point for writes, so no caller has to know which link is up.
+    private func transportSend(_ cmd: QxCmd, _ data: [UInt8] = []) {
+        switch link {
+        case .usb: hid.send(cmd, data)
+        case .bluetooth: ble.send(cmd, data)
+        case .none: DebugLog.shared.log("send dropped (no link): \(cmd)")
+        }
+    }
+
+    private func transportSendCoalesced(_ cmd: QxCmd, _ data: [UInt8], key: String) {
+        switch link {
+        case .usb: hid.sendCoalesced(cmd, data, key: key)
+        case .bluetooth: ble.sendCoalesced(cmd, data, key: key)
+        case .none: DebugLog.shared.log("coalesced send dropped (no link): \(cmd)")
+        }
+    }
+
     private var assembler = QxPresetAssembler()
     private var state = QxDeviceState()
     private var requestedNames = false
@@ -79,30 +108,115 @@ final class QudelixController: ObservableObject {
     func start() {
         hid.onDeviceConnected = { [weak self] name in
             Task { @MainActor in
-                self?.usbWired = true
-                self?.deviceConnected(name)
+                guard let self else { return }
+                self.usbWired = true
+                self.link = .usb                     // USB takes over from BLE
+                self.deviceConnected(name)
             }
         }
         hid.onDeviceRemoved = { [weak self] in
             Task { @MainActor in
-                self?.usbWired = false
-                self?.connection = .disconnected
-                self?.receivingReports = false
-                self?.batteryPercent = nil
+                guard let self else { return }
+                self.usbWired = false
+                guard self.link == .usb else { return }
+                self.link = .none
+                self.connection = .disconnected
+                self.resetDeviceState()
+                // The 5K may still be reachable over Bluetooth; if it is, its
+                // link will announce itself and we pick the handshake up there.
+                if self.ble.isConnected { self.adoptBluetooth() }
             }
         }
+        // Only the link that is actually carrying the protocol may feed the
+        // parsers. Both transports stay connected and subscribed regardless of
+        // which one is active, so without this a peripheral in radio range could
+        // inject device state while the user is on USB — forging a handshake to
+        // flip `compatibility`, or an eq_mode change that makes us re-request
+        // presets *over USB*. The write path is gated on `link`; the read path
+        // has to be too.
         hid.onInputReport = { [weak self] _, bytes in
-            Task { @MainActor in self?.handlePacket(bytes) }
+            Task { @MainActor in
+                guard let self, self.link == .usb else { return }
+                self.handlePacket(bytes)
+            }
         }
+
+        ble.onConnected = { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.link != .usb else { return }
+                self.adoptBluetooth()
+            }
+        }
+        ble.onDisconnected = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.link == .bluetooth else { return }
+                self.link = .none
+                self.connection = .disconnected
+                self.resetDeviceState()
+            }
+        }
+        ble.onPacket = { [weak self] bytes in
+            Task { @MainActor in
+                guard let self, self.link == .bluetooth else { return }
+                self.handlePacket(bytes)
+            }
+        }
+
         hid.start()
+        ble.start()
+    }
+
+    /// Clear everything that describes the device we were talking to. Used on
+    /// every teardown and before each handshake: after a link handover the
+    /// popover would otherwise show the previous session's firmware, sample rate
+    /// and preset names against a different device.
+    private func resetDeviceState() {
+        compatibility = .checking
+        receivingReports = false
+        firmwareVersion = nil
+        batteryPercent = nil
+        charging = false
+        sampleRate = nil
+        inputSource = nil
+        muted = false
+        activePreset = nil
+        presetNames = [:]
+        requestedNames = false
+        pendingGroup = nil
+        state = QxDeviceState()
+        assembler.reset()
+    }
+
+    /// Whether a Bluetooth device is remembered, so the UI can offer to forget it.
+    var hasPinnedBluetoothDevice: Bool { ble.hasPinnedDevice }
+
+    /// Forget the remembered Bluetooth device and start looking again. Drops the
+    /// current link if it is the Bluetooth one, so the next device can be adopted.
+    func forgetBluetoothDevice() {
+        ble.forgetPinnedDevice()
+        if link == .bluetooth {
+            link = .none
+            connection = .disconnected
+            resetDeviceState()
+        }
+        ble.disconnectAndRescan()
+    }
+
+    private func adoptBluetooth() {
+        link = .bluetooth
+        DebugLog.shared.log("link → bluetooth (vendor \(ble.vendor.label))")
+        // The popover shows the link with its own icon, so the name stays clean.
+        deviceConnected("Qudelix 5K")
     }
 
     private func deviceConnected(_ name: String) {
         connection = .connected(name: name)
-        assembler.reset()
-        state = QxDeviceState()
-        requestedNames = false
         handshakeAttempt = 0
+        // Everything describing the device belongs to the link we are now on, so
+        // none of it may carry over. Keeping `compatibility` would authorise
+        // writes to a device this link has never identified, and keeping
+        // `receivingReports` would defeat the handshake retry below.
+        resetDeviceState()
         // Give the interface a moment after enumeration, then run the same
         // handshake the official app sends on connect.
         Task { @MainActor [weak self] in
@@ -123,15 +237,15 @@ final class QudelixController: ObservableObject {
             self.sendHandshake()
         }
 
-        hid.send(.reqInitData, QxInit.requestPayload)   // [0, 0, At.Req]
+        transportSend(.reqInitData, QxInit.requestPayload)   // [0, 0, At.Req]
         // sys is included for dd.eq_mode — needed to detect 20-band mode.
-        hid.send(.reqDevConfig, [QxConfigMask.sys | QxConfigMask.playTime
+        transportSend(.reqDevConfig, [QxConfigMask.sys | QxConfigMask.playTime
                                  | QxConfigMask.dac | QxConfigMask.mic | QxConfigMask.batt])
-        hid.send(.reqDevConfig, [0xC0])                 // sys2 | eq
+        transportSend(.reqDevConfig, [0xC0])                 // sys2 | eq
         // audio | power | conn | vol — sample rate, battery, and current volume.
-        hid.send(.reqDevStatus, [QxStatusMask.audio | QxStatusMask.power
+        transportSend(.reqDevStatus, [QxStatusMask.audio | QxStatusMask.power
                                  | QxStatusMask.conn | QxStatusMask.vol])
-        hid.send(.reqEqPreset, [eqGroup.requestMask])
+        transportSend(.reqEqPreset, [eqGroup.requestMask])
     }
 
     // MARK: - RX
@@ -294,11 +408,13 @@ final class QudelixController: ObservableObject {
             + " eq=\(eqEnabled ? "on" : "off") preset=\(activePreset.map(String.init) ?? "?")"
             + " nameMask=\(String(state.presetNameMask, radix: 2))")
 
-        // Fetch saved preset names once the name mask is known.
-        if !requestedNames, state.presetNameMask != 0 {
+        // Fetch saved preset names once the name mask is known — but not while a
+        // group change is still queued, or we would request names using the mask
+        // parsed for the group we are about to leave.
+        if !requestedNames, pendingGroup == nil, state.presetNameMask != 0 {
             requestedNames = true
             for i in 0..<Self.presetCount where state.presetNameMask & (1 << i) != 0 {
-                hid.send(.reqEqPresetName, [eqGroup.rawValue, UInt8(i)])
+                transportSend(.reqEqPresetName, [eqGroup.rawValue, UInt8(i)])
             }
         }
     }
@@ -350,12 +466,31 @@ final class QudelixController: ObservableObject {
     /// starve the user's own volume and EQ writes. Real mode changes are a
     /// human action; one per second is generous.
     private var lastGroupSwitch = Date.distantPast
+    /// A group change that arrived inside the rate-limit window, waiting to apply.
+    private var pendingGroup: QxEqGroup?
     private static let groupSwitchInterval: TimeInterval = 1
 
     /// Re-target the EQ when the device reports a different mode.
     private func setEqGroup(_ group: QxEqGroup) {
-        guard group != eqGroup else { return }
-        guard Date().timeIntervalSince(lastGroupSwitch) >= Self.groupSwitchInterval else { return }
+        guard group != eqGroup else { pendingGroup = nil; return }
+        // Rate limited, but the change is *deferred* rather than dropped. Simply
+        // discarding it left `eqGroup` — which selects the band count and the
+        // group byte on every write — disagreeing with the device until it
+        // happened to re-report, so a correction arriving inside the window used
+        // to be lost.
+        let wait = Self.groupSwitchInterval - Date().timeIntervalSince(lastGroupSwitch)
+        if wait > 0 {
+            guard pendingGroup != group else { return }
+            pendingGroup = group
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(wait))
+                guard let self, let queued = self.pendingGroup else { return }
+                self.pendingGroup = nil
+                self.setEqGroup(queued)
+            }
+            return
+        }
+        pendingGroup = nil
         lastGroupSwitch = Date()
         DebugLog.shared.log("EQ group → \(group) (\(group.bandCount) bands)")
         eqGroup = group
@@ -366,7 +501,7 @@ final class QudelixController: ObservableObject {
         }
         requestedNames = false
         presetNames = [:]
-        hid.send(.reqEqPreset, [group.requestMask])
+        transportSend(.reqEqPreset, [group.requestMask])
     }
 
     // MARK: - Actions
@@ -382,7 +517,7 @@ final class QudelixController: ObservableObject {
         let clamped = max(volumeMax - 60, min(volumeMax, db))
         volumeDb = clamped
         let scaled = Int((clamped * QxScale.volume).rounded())
-        hid.sendCoalesced(.setVolume,
+        transportSendCoalesced(.setVolume,
                           [QxVolumeParam.sink.rawValue] + QxPacket.int16BE(scaled),
                           key: "volume")
     }
@@ -390,21 +525,21 @@ final class QudelixController: ObservableObject {
     func setMute(_ on: Bool) {
         guard canWrite else { return }
         muted = on
-        hid.send(.setVolume, [QxVolumeParam.mute.rawValue, 0, on ? 1 : 0])
+        transportSend(.setVolume, [QxVolumeParam.mute.rawValue, 0, on ? 1 : 0])
     }
 
     func setEqEnabled(_ on: Bool) {
         guard canWrite else { return }
         eqEnabled = on
-        hid.send(.setEqEnable, [eqGroup.rawValue, on ? 1 : 0])
+        transportSend(.setEqEnable, [eqGroup.rawValue, on ? 1 : 0])
     }
 
     func loadPreset(_ index: Int) {
         guard canWrite, (0..<Self.presetCount).contains(index) else { return }
         activePreset = index
         assembler.reset()
-        hid.send(.loadEqPreset, [UInt8(index)])
-        hid.send(.reqEqPreset, [eqGroup.requestMask])   // refresh band values
+        transportSend(.loadEqPreset, [UInt8(index)])
+        transportSend(.reqEqPreset, [eqGroup.requestMask])   // refresh band values
     }
 
     /// Display name for a preset slot, falling back to its number.
@@ -425,7 +560,7 @@ final class QudelixController: ObservableObject {
 
     func savePreset(_ index: Int) {
         guard canWrite, (0..<Self.presetCount).contains(index) else { return }
-        hid.send(.saveEqPreset, [UInt8(index)])
+        transportSend(.saveEqPreset, [UInt8(index)])
     }
 
     func setPreGain(_ db: Double) {
@@ -450,7 +585,7 @@ final class QudelixController: ObservableObject {
             + QxPacket.int16BE(v.freq)
             + QxPacket.int16BE(Int((v.gain * QxScale.gain).rounded()))
             + QxPacket.int16BE(Int((v.q * QxScale.q).rounded()))
-        hid.sendCoalesced(.setEqBandParam, payload, key: "band\(index)")
+        transportSendCoalesced(.setEqBandParam, payload, key: "band\(index)")
     }
 
     // MARK: - Preset import / export
@@ -464,7 +599,7 @@ final class QudelixController: ObservableObject {
             return
         }
         if !eqEnabled { setEqEnabled(true) }
-        hid.send(.setEqType, [eqGroup.rawValue, 1])   // 1 = PEQ
+        transportSend(.setEqType, [eqGroup.rawValue, 1])   // 1 = PEQ
         setPreGain(max(-12, min(12, file.preamp)))
 
         for i in 0..<bandCount {
@@ -538,13 +673,13 @@ final class QudelixController: ObservableObject {
         // Same curated mask as the handshake. `Yc.all` (0xFF) would set the
         // runtimeEq bit the firmware never uses plus an undefined bit 0x80,
         // and this device drops off the bus when it dislikes a report.
-        hid.send(.reqDevStatus, [QxStatusMask.audio | QxStatusMask.power
+        transportSend(.reqDevStatus, [QxStatusMask.audio | QxStatusMask.power
                                  | QxStatusMask.conn | QxStatusMask.vol])
-        hid.send(.reqEqPreset, [eqGroup.requestMask])
+        transportSend(.reqEqPreset, [eqGroup.requestMask])
     }
 
     private func sendEqParam(_ cmd: QxCmd, band: Int, scaled: Int) {
-        hid.sendCoalesced(cmd,
+        transportSendCoalesced(cmd,
                           [eqGroup.rawValue, QxEq.chMaskBoth, UInt8(clamping: band)]
                             + QxPacket.int16BE(scaled),
                           key: "\(cmd)-\(band)")

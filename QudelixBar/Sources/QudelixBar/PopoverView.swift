@@ -96,10 +96,18 @@ struct DeviceHeader: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(deviceName).font(.system(size: 13, weight: .semibold))
-                Text(statusLine)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if let icon = linkIcon {
+                        Image(systemName: icon)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .help(linkHelp)
+                    }
+                    Text(statusLine)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 4)
@@ -134,9 +142,31 @@ struct DeviceHeader: View {
         if case .connected(let n) = controller.connection { return n.replacingOccurrences(of: " USB DAC 96KHz", with: "") }
         return "Qudelix"
     }
+    /// Which link is carrying the protocol. Worth surfacing: the two behave
+    /// differently — USB is faster and always available, Bluetooth works away
+    /// from the cable but drops when the device sleeps.
+    private var linkIcon: String? {
+        switch controller.link {
+        case .usb: return "cable.connector"
+        case .bluetooth: return "antenna.radiowaves.left.and.right"
+        case .none: return nil
+        }
+    }
+    private var linkHelp: String {
+        switch controller.link {
+        case .usb: return "Connected over USB"
+        case .bluetooth: return "Connected over Bluetooth"
+        case .none: return "Not connected"
+        }
+    }
     private var statusLine: String {
         guard connected else { return "Not connected" }
-        var parts = ["USB"]
+        var parts: [String] = []
+        switch controller.link {
+        case .usb: parts.append("USB")
+        case .bluetooth: parts.append("Bluetooth")
+        case .none: break
+        }
         if let fw = controller.firmwareVersion { parts.append("FW \(fw)") }
         if let sr = controller.sampleRate, controller.inputSource != "None" { parts.append(sr) }
         if let src = controller.inputSource, src != "None" { parts.append(src) } else { parts.append("idle") }
@@ -427,7 +457,7 @@ struct DisconnectedView: View {
                 .font(.system(size: 26))
                 .foregroundStyle(.tertiary)
             Text("No Qudelix 5K found").font(.system(size: 12, weight: .medium))
-            Text("Connect the 5K with a USB data cable.\nIt will appear here automatically.")
+            Text("Connect the 5K by USB, or switch it on nearby for Bluetooth.\nIt will appear here automatically.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -451,6 +481,19 @@ struct FooterBar: View {
                 .foregroundStyle(.secondary)
 
             Spacer()
+
+            // The Bluetooth device is remembered on first connection so nothing
+            // else can be adopted later. That is the right default, but it needs
+            // an escape hatch: without one, pairing to the wrong device once left
+            // no way back short of editing preferences by hand.
+            if controller.hasPinnedBluetoothDevice {
+                Button { controller.forgetBluetoothDevice() } label: {
+                    Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help("Forget the remembered Bluetooth device and look for another")
+            }
 
             Button { showDiagnostics.toggle() } label: {
                 Image(systemName: "waveform.path.ecg").font(.system(size: 10))
