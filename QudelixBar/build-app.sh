@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="1.0.2"
+VERSION="1.1.0"
 APP=../Qudelix.app
 
 if [[ "${1:-}" == "--universal" ]]; then

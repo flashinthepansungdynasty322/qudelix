@@ -10,12 +10,14 @@ struct PopoverView: View {
         case equalizer = "Equalizer"
         case presets = "Presets"
         case importing = "Import"
+        case tune = "Tune"
         var id: String { rawValue }
         var icon: String {
             switch self {
             case .equalizer: return "slider.horizontal.3"
             case .presets: return "square.stack"
             case .importing: return "arrow.down.circle"
+            case .tune: return "ear"
             }
         }
     }
@@ -52,6 +54,7 @@ struct PopoverView: View {
                     case .equalizer: EqEditorView(editingBand: $editingBand)
                     case .presets: PresetsView()
                     case .importing: ImportView()
+                    case .tune: TuneView()
                     }
                 }
                 .padding(14)
@@ -95,11 +98,22 @@ struct DeviceHeader: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(deviceName).font(.system(size: 13, weight: .semibold))
-                Text(statusLine)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                Text(deviceName)
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
+                    .truncationMode(.tail)
+                HStack(spacing: 4) {
+                    if let icon = linkIcon {
+                        Image(systemName: icon)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .help(linkHelp)
+                    }
+                    Text(statusLine)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 4)
@@ -131,12 +145,39 @@ struct DeviceHeader: View {
         return false
     }
     private var deviceName: String {
-        if case .connected(let n) = controller.connection { return n.replacingOccurrences(of: " USB DAC 96KHz", with: "") }
-        return "Qudelix"
+        guard case .connected(let n) = controller.connection else { return "Qudelix" }
+        // Device-supplied: the USB product string or the BLE advertised name. The
+        // same sanitiser the preset names use — a 500-character or bidi-override
+        // product name would otherwise distort the header.
+        let cleaned = QudelixController.displayName(
+            n.replacingOccurrences(of: " USB DAC 96KHz", with: ""))
+        return cleaned.isEmpty ? "Qudelix" : cleaned
+    }
+    /// Which link is carrying the protocol. Worth surfacing: the two behave
+    /// differently — USB is faster and always available, Bluetooth works away
+    /// from the cable but drops when the device sleeps.
+    private var linkIcon: String? {
+        switch controller.link {
+        case .usb: return "cable.connector"
+        case .bluetooth: return "antenna.radiowaves.left.and.right"
+        case .none: return nil
+        }
+    }
+    private var linkHelp: String {
+        switch controller.link {
+        case .usb: return "Connected over USB"
+        case .bluetooth: return "Connected over Bluetooth"
+        case .none: return "Not connected"
+        }
     }
     private var statusLine: String {
         guard connected else { return "Not connected" }
-        var parts = ["USB"]
+        var parts: [String] = []
+        switch controller.link {
+        case .usb: parts.append("USB")
+        case .bluetooth: parts.append("Bluetooth")
+        case .none: break
+        }
         if let fw = controller.firmwareVersion { parts.append("FW \(fw)") }
         if let sr = controller.sampleRate, controller.inputSource != "None" { parts.append(sr) }
         if let src = controller.inputSource, src != "None" { parts.append(src) } else { parts.append("idle") }
@@ -271,7 +312,13 @@ struct BandRow: View {
     @Binding var editingBand: Int?
 
     var body: some View {
-        let band = controller.bands[index]
+        // The device chooses the band count: a reported eq_mode change swaps
+        // `bands` between 10 and 20 entries underneath the view. An in-flight
+        // AppKit control — a slider mid-drag, a text field losing focus — can
+        // fire its setter after the row it belongs to has gone, so neither the
+        // read here nor the one in `set` may assume this index still exists.
+        let band = controller.bands.indices.contains(index)
+            ? controller.bands[index] : QxEqBandValue()
         GridRow {
             Text("\(index + 1)")
                 .font(.system(size: 9).monospacedDigit())
@@ -319,6 +366,7 @@ struct BandRow: View {
     /// Mutate one field of this band and push it to the device.
     private func set<T>(_ apply: @escaping (inout QxEqBandValue, T) -> Void) -> (T) -> Void {
         { newValue in
+            guard controller.bands.indices.contains(index) else { return }
             var b = controller.bands[index]
             apply(&b, newValue)
             controller.updateBand(index, b)
@@ -427,7 +475,7 @@ struct DisconnectedView: View {
                 .font(.system(size: 26))
                 .foregroundStyle(.tertiary)
             Text("No Qudelix 5K found").font(.system(size: 12, weight: .medium))
-            Text("Connect the 5K with a USB data cable.\nIt will appear here automatically.")
+            Text("Connect the 5K by USB, or switch it on nearby for Bluetooth.\nIt will appear here automatically.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -451,6 +499,19 @@ struct FooterBar: View {
                 .foregroundStyle(.secondary)
 
             Spacer()
+
+            // The Bluetooth device is remembered on first connection so nothing
+            // else can be adopted later. That is the right default, but it needs
+            // an escape hatch: without one, pairing to the wrong device once left
+            // no way back short of editing preferences by hand.
+            if controller.hasPinnedBluetoothDevice {
+                Button { controller.forgetBluetoothDevice() } label: {
+                    Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help("Forget the remembered Bluetooth device and look for another")
+            }
 
             Button { showDiagnostics.toggle() } label: {
                 Image(systemName: "waveform.path.ecg").font(.system(size: 10))

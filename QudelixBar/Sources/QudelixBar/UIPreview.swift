@@ -111,6 +111,7 @@ enum UIPreview {
     @MainActor
     private static func mocks() -> [(String, QudelixController)] {
         [("eq", make(.equalizer)), ("presets", make(.presets)), ("import", make(.importing)),
+         ("tune", make(.tune)),
          ("disconnected", disconnected()), ("unsupported", unsupported()),
          ("b20", twentyBand())]
     }
@@ -119,6 +120,9 @@ enum UIPreview {
     private static func make(_ pane: PopoverView.Pane) -> QudelixController {
         let c = QudelixController()
         c.connection = .connected(name: "Qudelix-5K USB DAC 96KHz")
+        // Without this the Tune pane renders its "unsupported device" warning and
+        // a disabled Start button, which is not what the pane looks like in use.
+        c.compatibility = .ok
         c.firmwareVersion = "3.1.8"
         c.batteryPercent = 81
         c.charging = true

@@ -3,10 +3,14 @@ import CoreBluetooth
 
 // Standalone BLE probe for the Qudelix 5K GAIA endpoint.
 //
-// SAFETY: no blind GAIA command enumeration. In the GAIA spec 0x0100 is
-// DEVICE_RESET and nearby IDs include factory reset / DFU entry, so we only
-// send the known-safe GET_API_VERSION (0x0300) plus Qudelix's own read-only
-// ReqInitData through candidate framings. Nothing here writes settings.
+// SAFETY. The chip's own protocol shares this endpoint, and some of its command
+// ids perform factory reset, power off, pairing-list erase or firmware update.
+// Those are reachable only under the chip vendor's value, so:
+//
+//   - never sweep command ids under the chip vendor value;
+//   - probe under any other vendor value, which cannot reach them.
+//
+// Everything sent here is a getter, or the device's own read-only ReqInitData.
 //
 // Each probe is delivered only while the link is actually up, and the probe
 // list resumes across reconnects (the device drops the link every few seconds).
@@ -19,13 +23,51 @@ let DATA_CHAR = CBUUID(string: "00001103-D102-11E1-9B23-00025B00A5A5")  // read,
 // ReqInitData = 0x0100 with payload [0x00, 0x00, At.Req(4)]
 let REQ_INIT: [UInt8] = [0x01, 0x00, 0x00, 0x00, 0x04]
 
+/// Qualcomm's own vendor ID — the only value that reaches GAIA's built-in
+/// command handlers, and therefore the only value that can be dangerous.
+let GAIA_VENDOR_CSR: UInt16 = 0x000A
+/// GAIA_VENDOR_NONE. Routed straight to the customer application, so command
+/// IDs sent under it cannot hit a built-in reset, power-off, or flash write.
+let GAIA_VENDOR_NONE: UInt16 = 0x7FFE
+/// The device's own vendor value: commands sent under it reach its handler.
+let QUDELIX_VENDOR: UInt16 = 0xF003
+/// The value used by the original 5K.
+let QUDELIX_VENDOR_ALT: UInt16 = 0xF001
+
 struct Probe {
     let label: String
     let bytes: [UInt8]
     let onData: Bool   // send to 1103 rather than 1101
 }
 
+/// GAIA short framing: [vendor BE][command BE][payload].
+func gaia(_ cmd: UInt16, _ payload: [UInt8] = [], vendor: UInt16 = GAIA_VENDOR_CSR) -> [UInt8] {
+    [UInt8(vendor >> 8), UInt8(vendor & 0xFF), UInt8(cmd >> 8), UInt8(cmd & 0xFF)] + payload
+}
+
 let probes: [Probe] = [
+    // The device's own protocol, under its own vendor value. Read requests only.
+    Probe(label: "1101 vendor F001 ReqInitData",
+          bytes: gaia(0x0100, [0x00, 0x00, 0x04], vendor: QUDELIX_VENDOR_ALT), onData: false),
+    Probe(label: "1101 vendor F001 ReqDevStatus(conn)",
+          bytes: gaia(0x0110, [0x04], vendor: QUDELIX_VENDOR_ALT), onData: false),
+    Probe(label: "1101 vendor F003 ReqInitData",
+          bytes: gaia(0x0100, [0x00, 0x00, 0x04], vendor: QUDELIX_VENDOR), onData: false),
+    Probe(label: "1101 vendor F003 ReqDevStatus(conn)",
+          bytes: gaia(0x0110, [0x04], vendor: QUDELIX_VENDOR), onData: false),
+
+    // Baseline: the one exchange known to work, on the endpoint that actually
+    // answers. GAIA GET_API_VERSION (0x0300) is a read-only status query.
+    Probe(label: "1101 GET_API_VERSION (baseline)", bytes: gaia(0x0300), onData: false),
+
+    // Read-only queries under the chip vendor value. All are getters: none
+    // resets, powers off, or writes flash.
+    Probe(label: "1101 GET_HOST_FEATURE_INFORMATION", bytes: gaia(0x0320), onData: false),
+    Probe(label: "1101 GET_HOST_FEATURE_INFORMATION(0)", bytes: gaia(0x0320, [0x00]), onData: false),
+    Probe(label: "1101 GET_AUTH_BITMAPS", bytes: gaia(0x0580), onData: false),
+    Probe(label: "1101 GET_SESSION_ENABLE", bytes: gaia(0x0584), onData: false),
+    Probe(label: "1101 GET_APPLICATION_VERSION", bytes: gaia(0x0304), onData: false),
+    Probe(label: "1101 GET_MODULE_ID", bytes: gaia(0x0303), onData: false),
     // The data endpoint (1103) — GAIA's bulk channel. Prime suspect.
     Probe(label: "1103 raw Qudelix", bytes: REQ_INIT, onData: true),
     Probe(label: "1103 hid-style [len+1,0x80,...]",
@@ -38,6 +80,9 @@ let probes: [Probe] = [
           bytes: [UInt8(REQ_INIT.count + 1), 0x80] + REQ_INIT, onData: false),
     Probe(label: "1101 raw Qudelix", bytes: REQ_INIT, onData: false),
 ]
+
+/// `--enumerate` dumps the GATT database and writes nothing.
+let enumerateOnly = CommandLine.arguments.contains("--enumerate")
 
 func hex(_ b: [UInt8]) -> String { b.map { String(format: "%02X", $0) }.joined(separator: " ") }
 func stamp() -> String {
@@ -52,6 +97,7 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var index = 0
     var ready = false
     var gotAnyReply = false
+    var pendingServices = 0
 
     func run() { central = CBCentralManager(delegate: self, queue: .main) }
 
@@ -65,6 +111,20 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                         advertisementData: [String: Any], rssi: NSNumber) {
         guard (p.name ?? "").localizedCaseInsensitiveContains("qudelix") else { return }
         note("found \(p.name!) rssi=\(rssi)")
+        // Passive: dump the whole advertisement, including any manufacturer data.
+        for (k, v) in advertisementData.sorted(by: { $0.key < $1.key }) {
+            if let d = v as? Data {
+                var line = "    adv \(k): \(hex([UInt8](d)))"
+                if k == CBAdvertisementDataManufacturerDataKey, d.count >= 2 {
+                    // Company ID is little-endian per the Core Bluetooth spec.
+                    let company = Int(d[0]) | Int(d[1]) << 8
+                    line += String(format: "   -> company id 0x%04X", company)
+                }
+                note(line)
+            } else {
+                note("    adv \(k): \(v)")
+            }
+        }
         c.stopScan()
         peripheral = p; p.delegate = self
         c.connect(p)
@@ -73,7 +133,9 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
         note("connected")
         ready = false
-        p.discoverServices([SERVICE])
+        // nil, not [SERVICE]: enumerate everything, so a service we do not
+        // already know about still shows up.
+        p.discoverServices(nil)
     }
 
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
@@ -82,12 +144,35 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         c.connect(p)
     }
 
+    func describe(_ props: CBCharacteristicProperties) -> String {
+        var out: [String] = []
+        if props.contains(.read) { out.append("read") }
+        if props.contains(.write) { out.append("write") }
+        if props.contains(.writeWithoutResponse) { out.append("writeNR") }
+        if props.contains(.notify) { out.append("notify") }
+        if props.contains(.indicate) { out.append("indicate") }
+        if props.contains(.authenticatedSignedWrites) { out.append("signedWrite") }
+        if props.contains(.notifyEncryptionRequired) { out.append("notifyEnc") }
+        if props.contains(.indicateEncryptionRequired) { out.append("indicateEnc") }
+        if props.contains(.extendedProperties) { out.append("extended") }
+        if props.contains(.broadcast) { out.append("broadcast") }
+        return out.isEmpty ? "none" : out.joined(separator: ",")
+    }
+
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
-        p.services?.forEach { p.discoverCharacteristics(nil, for: $0) }
+        let services = p.services ?? []
+        note("GATT: \(services.count) service(s)")
+        pendingServices = services.count
+        for s in services {
+            note("  service \(s.uuid)\(s.uuid == SERVICE ? "   <- GAIA" : "")"
+                 + (s.isPrimary ? "" : " (secondary)"))
+            p.discoverCharacteristics(nil, for: s)
+        }
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) {
         for c in s.characteristics ?? [] {
+            note("    char \(s.uuid) / \(c.uuid)  props=\(describe(c.properties))")
             switch c.uuid {
             case CMD_CHAR: cmdChar = c
             case DATA_CHAR: dataChar = c
@@ -96,6 +181,16 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             }
             if c.properties.contains(.notify) { p.setNotifyValue(true, for: c) }
             if c.properties.contains(.read) { p.readValue(for: c) }
+        }
+        pendingServices -= 1
+        if enumerateOnly {
+            // Structure only — no probe writes at all. Give reads a moment to
+            // land, then stop; the device tears the link down after ~5 s anyway.
+            if pendingServices <= 0 {
+                note("enumeration complete — collecting reads for 3s")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { note("done"); exit(0) }
+            }
+            return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             guard p.state == .connected else { return }

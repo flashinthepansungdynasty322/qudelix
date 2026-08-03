@@ -1,30 +1,58 @@
 import Foundation
 import CoreBluetooth
 
-/// BLE transport for the Qudelix 5K. Not wired up yet — the app drives the
-/// device over USB HID (see `QudelixController`), because the 5K's BLE endpoint
-/// speaks Qualcomm GAIA and does not accept Qudelix commands directly.
+/// BLE transport for the Qudelix 5K.
 ///
-/// The GATT layout is discovered at runtime and logged. Adoption is deliberately
-/// narrow: only the GAIA service, only its command and response characteristics,
-/// and only when those characteristics really carry the properties their UUIDs
-/// imply. Since every byte of a BLE advertisement is chosen by the advertiser,
-/// the first device to complete a link is pinned by identifier and nothing else
-/// is adopted afterwards — see `pinnedIdentifier`.
+/// The device's BLE endpoint carries the same `[cmd, data…]` packets the USB HID
+/// path sends, behind a 16-bit vendor field:
+///
+///     TX  [vendor][cmdHi cmdLo][data…]                    -> characteristic 1101
+///     RX  [vendor][cmd|0x8000][status][payload…]           <- characteristic 1102
+///
+/// A reply carries the *response* command id, so ReqInitData (0x0100) is answered
+/// by RspInitData (0x0101) with the high bit set, and its payload is byte-for-byte
+/// what USB delivers after the length and command bytes. That is why everything
+/// above the transport is shared between the two links.
+///
+/// Adoption is deliberately narrow: one known service, only its command and
+/// response characteristics, and only when those characteristics really carry the
+/// properties their UUIDs imply. Since every byte of a BLE advertisement is chosen
+/// by the advertiser, the first device to complete a link is pinned by identifier
+/// and nothing else is adopted afterwards — see `pinnedIdentifier`.
 final class BLETransport: NSObject {
-    /// Qualcomm GAIA v2/v3 service + endpoints (the likely candidate).
+    /// Qualcomm GAIA v2/v3 service + endpoints.
     static let gaiaService = CBUUID(string: "00001100-D102-11E1-9B23-00025B00A5A5")
     static let gaiaCommand = CBUUID(string: "00001101-D102-11E1-9B23-00025B00A5A5")
     static let gaiaResponse = CBUUID(string: "00001102-D102-11E1-9B23-00025B00A5A5")
 
-    enum Framing: String { case raw, hidStyle }
+    /// The vendor field. A closed enum on purpose — do not add cases.
+    ///
+    /// Some of this device's command ids coincide with destructive commands in the
+    /// underlying chip protocol, which are reachable only under a different vendor
+    /// value. Making that value unrepresentable means no later edit can turn a
+    /// routine setting into a reset.
+    enum Vendor: UInt16, CaseIterable {
+        /// The original 5K. Verified against firmware 3.1.8 and 3.2.7.
+        case qudelix = 0xF001
+        /// The other generation. Untested: a 5K rejects it.
+        case qudelixMk2 = 0xF003
+
+        var label: String { String(format: "0x%04X", rawValue) }
+    }
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var loggedPeripherals = Set<UUID>()
+    private var othersSeen = 0
+    private var ignoredFrames = 0
     private var writeChar: CBCharacteristic?
     private var notifyChar: CBCharacteristic?
-    private(set) var framing: Framing = .raw
+
+    /// Which vendor id we are framing with. Starts on the 5K's and falls back
+    /// once if the device rejects it, so an mk2 is not left unreachable.
+    private(set) var vendor: Vendor = .qudelix
+    private var triedFallbackVendor = false
+    private var sawGoodReply = false
 
     var onConnected: ((String) -> Void)?
     var onDisconnected: (() -> Void)?
@@ -36,9 +64,27 @@ final class BLETransport: NSObject {
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
-    func setFraming(_ f: Framing) {
-        framing = f
-        DebugLog.shared.log("BLE framing → \(f.rawValue)")
+    /// GAIA frame for one Qudelix command. The vendor can only ever be one of
+    /// `Vendor`, so this cannot address GAIA's built-in command handlers.
+    static func frame(_ vendor: Vendor, _ cmd: QxCmd, _ data: [UInt8]) -> [UInt8] {
+        [UInt8(vendor.rawValue >> 8), UInt8(vendor.rawValue & 0xFF)]
+            + QxPacket.payload(cmd, data)
+    }
+
+    /// Turn a GAIA reply into the `[len, cmdHi, cmdLo, payload…]` shape the rest
+    /// of the app already parses, so nothing downstream needs to know about BLE.
+    /// Returns nil for frames that are not ours, or that carry a failure status.
+    static func decode(_ raw: [UInt8], expecting vendor: Vendor) -> (packet: [UInt8], status: UInt8)? {
+        guard raw.count >= 5 else { return nil }
+        let seen = UInt16(raw[0]) << 8 | UInt16(raw[1])
+        guard seen == vendor.rawValue else { return nil }
+        let status = raw[4]
+        let payload = Array(raw[5...])
+        // The length byte is what `QxPacket.parseRx` uses to bound the payload;
+        // a frame longer than it can express would be silently truncated there.
+        guard payload.count + 2 <= 0xFF else { return nil }
+        let packet = [UInt8(payload.count + 2), raw[2] & 0x7F, raw[3]] + payload
+        return (packet, status)
     }
 
     func send(_ cmd: QxCmd, _ data: [UInt8] = []) {
@@ -46,19 +92,35 @@ final class BLETransport: NSObject {
             DebugLog.shared.log("BLE send dropped (not connected): \(cmd)")
             return
         }
-        let payload = QxPacket.payload(cmd, data)
-        let bytes: [UInt8]
-        switch framing {
-        case .raw:
-            bytes = payload
-        case .hidStyle:
-            bytes = [UInt8(payload.count + 1), 0x80] + payload
-        }
         DebugLog.shared.tx(cmd, data)
         let type: CBCharacteristicWriteType =
-            c.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
-        p.writeValue(Data(bytes), for: c, type: type)
+            c.properties.contains(.write) ? .withResponse : .withoutResponse
+        p.writeValue(Data(Self.frame(vendor, cmd, data)), for: c, type: type)
     }
+
+    /// Latest-value-wins queue, same idea as the USB path: a slider drag emits
+    /// ~60 updates a second and only the newest is worth sending. BLE writes are
+    /// far cheaper than the USB path's 20 ms, so the window is short.
+    private var pending: [String: (QxCmd, [UInt8])] = [:]
+    private var flushScheduled = false
+    private static let coalesceWindow = 0.03
+
+    func sendCoalesced(_ cmd: QxCmd, _ data: [UInt8], key: String) {
+        pending[key] = (cmd, data)
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.coalesceWindow) { [weak self] in
+            guard let self else { return }
+            self.flushScheduled = false
+            let batch = self.pending
+            self.pending = [:]
+            for (_, item) in batch { self.send(item.0, item.1) }
+        }
+    }
+
+    /// Drop anything queued but not yet flushed. Used when the controller moves
+    /// to the other transport, so a stale write cannot arrive afterwards.
+    func clearPending() { pending = [:] }
 
     /// Identifier of the peripheral this app has already linked with.
     ///
@@ -76,16 +138,55 @@ final class BLETransport: NSObject {
         set { UserDefaults.standard.set(newValue?.uuidString, forKey: Self.pinnedKey) }
     }
 
-    /// Forget the pinned device — for a "connect to a different 5K" affordance.
+    var hasPinnedDevice: Bool { pinnedIdentifier != nil }
+
+    /// A device the user just asked us to forget, held back briefly so it cannot
+    /// immediately re-pin itself.
+    ///
+    /// `cancelPeripheralConnection` only drops *our* connection; the 5K normally
+    /// stays connected to the system as an audio device, so
+    /// `retrieveConnectedPeripherals` hands it straight back — ahead of any
+    /// advertisement — and with the pin gone it would be adopted and re-pinned.
+    /// Pressing Forget repeatedly could never escape that. The exclusion expires
+    /// so that forgetting the only 5K in the room doesn't disable Bluetooth
+    /// until relaunch: a different device gets first refusal, and if none turns
+    /// up we go back to the original.
+    private var shunned: (id: UUID, until: Date)?
+    private static let shunWindow: TimeInterval = 60
+
+    /// Drop the current link and go back to scanning, so a newly-unpinned device
+    /// can be replaced by another one without relaunching.
+    func disconnectAndRescan() {
+        if let p = peripheral { central?.cancelPeripheralConnection(p) }
+        connectTimeout?.cancel()
+        teardown(reason: "forget device")
+        reconnectDelay = 0.5
+        // Deliberately scheduled rather than immediate. Scanning straight away
+        // re-adopts the peripheral we just cancelled — it is still connected at
+        // the system level — and the cancellation's disconnect callback then
+        // arrives and tears the fresh link down again. Letting the backoff run
+        // gives the cancellation time to land first.
+        scheduleScan()
+    }
+
+    /// Forget the pinned device, so the next adoptable one becomes the new pin.
     func forgetPinnedDevice() {
+        if let id = peripheral?.identifier ?? pinnedIdentifier {
+            shunned = (id, Date().addingTimeInterval(Self.shunWindow))
+        }
         UserDefaults.standard.removeObject(forKey: Self.pinnedKey)
-        DebugLog.shared.log("BLE pinned device cleared")
+        DebugLog.shared.log("BLE pinned device cleared; giving another device "
+            + "\(Int(Self.shunWindow))s of priority")
     }
 
     /// Whether this peripheral may be adopted at all. Once pinned, identity is
     /// the only question; before that, the name is a filter and the real check
     /// happens against the GATT database in `didDiscoverCharacteristicsFor`.
     private func isAdoptable(_ p: CBPeripheral, advertisedName: String? = nil) -> Bool {
+        if let s = shunned {
+            if Date() >= s.until { shunned = nil }            // exclusion expired
+            else if p.identifier == s.id { return false }
+        }
         if let pinned = pinnedIdentifier { return p.identifier == pinned }
         let name = advertisedName ?? p.name ?? ""
         return name.localizedCaseInsensitiveContains("qudelix")
@@ -93,6 +194,9 @@ final class BLETransport: NSObject {
 
     private func beginScan() {
         DebugLog.shared.log("BLE scanning…")
+        // Devices that rotate their random address yield a fresh identifier each
+        // time, so this set would grow without bound across a long scan.
+        loggedPeripherals.removeAll()
         // A known device can be reconnected by identifier without scanning, and
         // without any name matching being involved.
         if let pinned = pinnedIdentifier,
@@ -113,18 +217,79 @@ final class BLETransport: NSObject {
         central.scanForPeripherals(withServices: nil, options: nil)
     }
 
+    /// Backoff between reconnect attempts, and a ceiling on a pending connect.
+    ///
+    /// `central.connect` never times out on its own, so a pinned device that is
+    /// switched off left the app in a permanently pending connect that never
+    /// fell back to scanning. And retrying with no delay let a peripheral that
+    /// accepts then immediately drops the link spin us as fast as the radio
+    /// allows, each cycle costing a fresh handshake burst upstream.
+    private var reconnectDelay: TimeInterval = 0.5
+    private static let maxReconnectDelay: TimeInterval = 8
+    private static let connectTimeoutSeconds: TimeInterval = 10
+    private var connectTimeout: DispatchWorkItem?
+    private var scanScheduled = false
+
+    private func scheduleScan() {
+        guard !scanScheduled else { return }
+        scanScheduled = true
+        let delay = reconnectDelay
+        reconnectDelay = min(reconnectDelay * 2, Self.maxReconnectDelay)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.scanScheduled = false
+            guard self.central?.state == .poweredOn, self.peripheral == nil else { return }
+            self.beginScan()
+        }
+    }
+
     private func adopt(_ p: CBPeripheral) {
         peripheral = p
         p.delegate = self
         central.stopScan()
         central.connect(p, options: nil)
+
+        connectTimeout?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let pending = self.peripheral, !self.isConnected else { return }
+            DebugLog.shared.log("BLE connect timed out — cancelling and rescanning")
+            self.central.cancelPeripheralConnection(pending)
+            self.teardown(reason: "connect timeout")
+            self.scheduleScan()
+        }
+        connectTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectTimeoutSeconds, execute: work)
     }
 }
 
 extension BLETransport: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         DebugLog.shared.log("BLE state: \(central.state.rawValue)")
-        if central.state == .poweredOn { beginScan() }
+        guard central.state == .poweredOn else {
+            // Turning Bluetooth off does not reliably deliver a disconnect, so
+            // without this the characteristics stay non-nil, `isConnected` keeps
+            // answering true, every send goes nowhere, and the re-adoption guard
+            // (`writeChar == nil`) then refuses to reconnect when it comes back.
+            teardown(reason: "adapter state \(central.state.rawValue)")
+            return
+        }
+        beginScan()
+    }
+
+    /// Drop everything tied to a live link. Safe to call when already down.
+    private func teardown(reason: String) {
+        let wasUp = isConnected
+        peripheral = nil
+        writeChar = nil
+        notifyChar = nil
+        pending = [:]
+        vendor = .qudelix
+        triedFallbackVendor = false
+        sawGoodReply = false
+        if wasUp {
+            DebugLog.shared.log("BLE link torn down (\(reason))")
+            onDisconnected?()
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover p: CBPeripheral,
@@ -132,9 +297,16 @@ extension BLETransport: CBCentralManagerDelegate {
         let name = p.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? ""
         let advServices = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
 
+        // Deliberately does NOT log every peripheral it sees. A scan picks up the
+        // names of neighbours' televisions, thermometers and headphones, and this
+        // log is what users attach to bug reports — so only devices that pass the
+        // name filter are ever named here. The rest are counted, which is all
+        // that is needed to tell "scanning works" from "nothing in range".
         if loggedPeripherals.insert(p.identifier).inserted {
-            let svc = advServices.isEmpty ? "" : " services=[\(advServices.map(\.uuidString).joined(separator: ","))]"
-            DebugLog.shared.log("BLE seen: \(name.isEmpty ? "(unnamed)" : name)\(svc) rssi=\(RSSI)")
+            othersSeen += 1
+            if othersSeen % 25 == 0 {
+                DebugLog.shared.log("BLE scanning: \(othersSeen) other peripherals ignored")
+            }
         }
 
         // Everything here is advertiser-controlled, so this is a filter to
@@ -154,18 +326,30 @@ extension BLETransport: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
+        guard isCurrent(p) else { return }
         DebugLog.shared.log("BLE connect failed: \(error?.localizedDescription ?? "?")")
-        peripheral = nil
-        beginScan()
+        connectTimeout?.cancel()
+        teardown(reason: "connect failed")
+        scheduleScan()
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+        guard isCurrent(p) else { return }
         DebugLog.shared.log("BLE disconnected\(error.map { ": \($0.localizedDescription)" } ?? "")")
-        peripheral = nil
-        writeChar = nil
-        notifyChar = nil
-        onDisconnected?()
-        beginScan()
+        connectTimeout?.cancel()
+        // `teardown` also restarts each link on the 5K's vendor id. Latching the
+        // fallback for the life of the process meant one rejected frame — which
+        // any peripheral can send — left every later session framed for hardware
+        // we are not talking to, with no way back short of relaunching.
+        teardown(reason: "peer disconnected")
+        scheduleScan()
+    }
+
+    /// Ignore delegate callbacks for a peripheral we are no longer tracking; a
+    /// late callback for a stale one would otherwise tear down the live link.
+    private func isCurrent(_ p: CBPeripheral) -> Bool {
+        guard let current = peripheral else { return false }
+        return p.identifier == current.identifier
     }
 }
 
@@ -212,8 +396,11 @@ extension BLETransport: CBPeripheralDelegate {
             }
             if pinnedIdentifier == nil {
                 pinnedIdentifier = p.identifier
+                if shunned?.id != p.identifier { shunned = nil }
                 DebugLog.shared.log("BLE pinned this device for future sessions")
             }
+            connectTimeout?.cancel()
+            reconnectDelay = 0.5           // a good link earns a fast retry next time
             DebugLog.shared.log("BLE adopted GAIA link: tx=\(w.uuid) rx=\(n.uuid)")
             onConnected?(p.name ?? "Qudelix 5K")
         }
@@ -224,8 +411,39 @@ extension BLETransport: CBPeripheralDelegate {
     }
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
+        // ATT permits a server to notify any handle regardless of what we
+        // subscribed to, so pin the source: our peripheral, our response
+        // characteristic. Otherwise a peripheral could feed protocol frames in
+        // through any characteristic it happens to expose.
+        guard isCurrent(p), c.uuid == Self.gaiaResponse else { return }
         guard error == nil, let data = c.value else { return }
-        onPacket?([UInt8](data))
+        let raw = [UInt8](data)
+        guard let (packet, status) = Self.decode(raw, expecting: vendor) else {
+            // One line per frame would let a notification flood rotate the
+            // user's real diagnostics out of the log.
+            ignoredFrames += 1
+            if ignoredFrames == 1 || ignoredFrames % 50 == 0 {
+                DebugLog.shared.log("BLE ignored \(ignoredFrames) undecodable frame(s); latest: "
+                    + raw.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " "))
+            }
+            return
+        }
+        guard status == 0 else {
+            // Status 1 is NOT_SUPPORTED. Before any successful exchange that
+            // most likely means the wrong vendor id for this hardware, so try
+            // the other one once rather than sitting mute.
+            DebugLog.shared.log("BLE vendor \(vendor.label) rejected the command (status \(status))")
+            if !sawGoodReply, !triedFallbackVendor,
+               let other = Vendor.allCases.first(where: { $0 != vendor }) {
+                triedFallbackVendor = true
+                vendor = other
+                DebugLog.shared.log("BLE retrying as vendor \(other.label)")
+                onConnected?(peripheral?.name ?? "Qudelix 5K")
+            }
+            return
+        }
+        sawGoodReply = true
+        onPacket?(packet)
     }
 
     func peripheral(_ p: CBPeripheral, didWriteValueFor c: CBCharacteristic, error: Error?) {
