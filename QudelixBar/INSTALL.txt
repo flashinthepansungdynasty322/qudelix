@@ -42,8 +42,9 @@ skip the question entirely.
 
 USING IT
 --------
-Plug the 5K into your Mac by USB. The app connects on its own; the menu bar
-icon fills in when it is talking to the device. Click it for:
+Connect the 5K by USB, or just have it powered on nearby for Bluetooth. The app
+connects on its own and prefers USB when both are available; the menu bar icon
+fills in when it is talking to the device. Click it for:
 
   - Live status: battery, charging, firmware, sample rate, input source
   - Volume slider and mute
@@ -52,8 +53,9 @@ icon fills in when it is talking to the device. Click it for:
   - Preset import from a file or from the AutoEq database (6,000+ headphones)
   - A diagnostics panel showing every packet exchanged with the device
 
-Bluetooth is not used. The app talks to the 5K's USB HID control interface
-and does not touch the audio path, so playback is unaffected.
+Either link carries the same commands: USB HID over the vendor interface, or
+Bluetooth LE with the same packets tunnelled inside Qualcomm GAIA frames.
+Neither touches the audio path, so playback is unaffected.
 
 To start it automatically, add it in System Settings > General > Login Items.
 
@@ -68,7 +70,11 @@ network and disk activity in the app:
     you open the Import pane, never at launch.
   - There is no telemetry, no analytics, no identifiers, no crash reporting.
   - It writes one local file, ~/Library/Logs/QudelixBar.log, containing device
-    packets, firmware version, battery and volume. It is never transmitted.
+    packets, firmware version, battery and volume. Because it records raw packet
+    hex, it also contains your 5K's own Bluetooth address and any preset names
+    you have saved on the device. It is never transmitted, but do glance over it
+    before attaching it to a bug report. Bluetooth scanning does not record the
+    names of any other devices nearby.
   - It only writes EQ, volume, and preset settings to the 5K — the same
     settings the official app writes. It never touches firmware.
 
@@ -77,7 +83,7 @@ REQUIREMENTS
 ------------
   - macOS 14 (Sonoma) or later
   - Apple Silicon or Intel (universal binary)
-  - Qudelix 5K connected by USB. Tested against firmware 3.1.8.
+  - Qudelix 5K by USB or Bluetooth. Tested against firmware 3.1.8 and 3.2.7.
 
 
 TROUBLESHOOTING

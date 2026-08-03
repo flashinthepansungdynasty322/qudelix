@@ -1,6 +1,7 @@
 # Qudelix for macOS
 
-A native macOS menu bar app for configuring the **Qudelix 5K** DAC/amp over USB.
+A native macOS menu bar app for configuring the **Qudelix 5K** DAC/amp, over USB
+or Bluetooth.
 
 [![Download](https://img.shields.io/github/v/release/FrankieMa77/qudelix?label=download&style=flat-square)](https://github.com/FrankieMa77/qudelix/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/FrankieMa77/qudelix/total?style=flat-square)](https://github.com/FrankieMa77/qudelix/releases)
@@ -37,8 +38,10 @@ right.
 - **Export** your EQ in the standard parametric format
 - **Diagnostics panel** logging every packet exchanged with the device
 
-Bluetooth is not used. The app speaks to the 5K's USB HID control interface and
-never touches the audio path, so playback is unaffected.
+Works over **USB or Bluetooth**. USB is used whenever the 5K is plugged in;
+otherwise the app controls the device over Bluetooth LE. Either way it only
+speaks to the 5K's control interface and never touches the audio path, so
+playback is unaffected.
 
 ## Install
 
@@ -114,9 +117,13 @@ no third-party dependencies.
 - The only host contacted is `raw.githubusercontent.com`, and only to fetch the
   AutoEq headphone list and the preset you choose. This happens when you open
   the Import pane, never at launch.
-- No telemetry, analytics, identifiers, or crash reporting.
+- No telemetry, analytics, or crash reporting, and nothing is ever uploaded.
 - One local file is written, `~/Library/Logs/QudelixBar.log`, holding device
-  packet traces. It is never transmitted.
+  packet traces. It is never transmitted. Since it records raw packet hex it
+  includes the 5K's own Bluetooth address and any preset names stored on it, so
+  it is worth a glance before attaching it to a bug report.
+- Bluetooth scanning never records the names of other devices nearby, only a
+  count of how many were ignored.
 - Only EQ, volume, and preset settings are written to the device — the same
   things the official app writes. Firmware is never touched.
 
