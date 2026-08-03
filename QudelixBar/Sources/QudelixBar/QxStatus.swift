@@ -58,6 +58,22 @@ enum QxStatusParser {
 
     /// RspInitData: [devId u16 BE][status u8 == 3][8B fw version bitfield]
     /// [devStatus block][devConfig block][warranty 4B][usbMute]
+    ///
+    /// Only the identity fields are read here. The trailing devStatus/devConfig
+    /// blocks are deliberately skipped, because their start offset cannot be
+    /// computed reliably: the embedded devStatus block is longer than its own
+    /// mask byte accounts for. On a 5K running 3.2.7 the mask is 0x08
+    /// (runtime_Info, nominally 4 bytes) yet the block occupies 9, so walking
+    /// past it lands 4 bytes early and every field after is read from the wrong
+    /// place. That misread `eq_mode` as 1 and flipped the app into 20-band mode
+    /// on every connect. Checked against a real 54-byte reply: reading the
+    /// devConfig block at offset 20 is the only interpretation whose sizes add
+    /// up to the payload length, and whose `sys` bytes match the standalone
+    /// RspDevConfig byte-for-byte; the computed offset of 16 does neither.
+    ///
+    /// Nothing is lost by skipping them. The handshake immediately requests the
+    /// same data explicitly — ReqDevConfig 0x3D and 0xC0, ReqDevStatus 0x47 —
+    /// and those replies carry one block each with an unambiguous layout.
     static func parseInitData(_ d: [UInt8], into state: inout QxDeviceState) -> Bool {
         guard d.count >= 11 else { return false }
         let devId = Int(d[0]) << 8 | Int(d[1])
@@ -69,10 +85,6 @@ enum QxStatusParser {
         state.fwVersion = "\(major).\(minor).\(rev)"
         state.fwMajor = major
         state.fwMinor = minor
-
-        var off = 11
-        off += parseDevStatus(d.tail(from: off), into: &state)
-        _ = parseDevConfig(d.tail(from: off), into: &state)
         return true
     }
 
